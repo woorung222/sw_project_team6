@@ -3,7 +3,7 @@
 # [Master Scanner] Rocky_9 취약점 점검 통합 실행 스크립트
 # 위치: /home/audit/scanner.sh
 
-BASE_DIR="/home/audit/rocky_9"
+BASE_DIR="/home/audit/sw_project_team6/Choung/Rocky9_sh"
 RESULT_DIR="$BASE_DIR/test"
 TEMP_LOG="$RESULT_DIR/temp_scan.log"
 
