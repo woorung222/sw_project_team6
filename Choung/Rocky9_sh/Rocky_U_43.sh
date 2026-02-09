@@ -6,8 +6,6 @@
 # 자동 조치 가능 유무 : 가능
 # 플래그 설명:
 #   U_43_1 : [systemd/Process] NIS 서비스(ypserv, ypbind 등) 활성화 발견
-#   U_43_2 : [xinetd] xinetd 설정 내 NIS 서비스 활성화 발견
-#   U_43_3 : [inetd] inetd 설정 내 NIS 서비스 활성화 발견
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -50,27 +48,6 @@ if [[ -n "$SYS_CHECK" ]] || [[ -n "$PROC_CHECK" ]]; then
     [[ -n "$PROC_CHECK" ]] && echo "   -> Process 실행중: $PROC_CHECK"
 fi
 
-# 2. [xinetd] 점검 (U_43_2) - PDF p.100 
-if [[ -d "/etc/xinetd.d" ]]; then
-    # disable = no 설정 확인
-    XINETD_CHECK=$(grep -rEi "disable" /etc/xinetd.d/ 2>/dev/null | grep -E "$NIS_REGEX" | grep -iw "no")
-    if [[ -n "$XINETD_CHECK" ]]; then
-        VULN_STATUS=1
-        VULN_FLAGS+=("U_43_2")
-        echo -e "${RED}[취약]${NC} [xinetd] 설정에서 NIS 서비스가 활성화되어 있습니다."
-    fi
-fi
-
-# 3. [inetd] 점검 (U_43_3) - PDF p.99 
-if [[ -f "/etc/inetd.conf" ]]; then
-    # 주석 제외하고 설정 존재 여부 확인
-    INETD_CHECK=$(grep -v "^#" /etc/inetd.conf | grep -E "$NIS_REGEX")
-    if [[ -n "$INETD_CHECK" ]]; then
-        VULN_STATUS=1
-        VULN_FLAGS+=("U_43_3")
-        echo -e "${RED}[취약]${NC} [inetd] 설정에서 NIS 서비스가 활성화되어 있습니다."
-    fi
-fi
 
 # 최종 결과 출력
 echo "----------------------------------------------------------------"

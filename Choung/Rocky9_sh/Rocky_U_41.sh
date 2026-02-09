@@ -3,10 +3,10 @@
 # [U-41] 불필요한 automountd 제거
 # 대상 운영체제 : Rocky Linux 9
 # 가이드라인 출처 : KISA 주요정보통신기반시설 가이드 p.93-95
-# 자동 조치 가능 유무 : 가능
+# 자동 조치 가능 유무 : 가능 (서비스 중지 및 비활성화)
 # 플래그 설명:
-#   U_41_1 : [systemd] autofs 서비스 활성화 발견
-#   U_41_2 : [Process] automount 프로세스 실행 발견
+#   U_41_1 : [Running] automountd(autofs) 서비스 또는 프로세스가 현재 실행 중 (취약)
+#   U_41_2 : [Boot] autofs 서비스가 부팅 시 자동 실행되도록 설정됨 (취약)
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -19,26 +19,31 @@ echo "----------------------------------------------------------------"
 VULN_STATUS=0
 VULN_FLAGS=()
 
-# 1. [systemd] 점검 (U_41_1) - PDF p.94
-# autofs 서비스 유닛 활성화 여부 확인
-# Rocky 9에서는 보통 autofs.service를 사용함
-AUTO_SVC_CHECK=$(systemctl list-units --type service 2>/dev/null | grep -E "autofs|automount" | grep -w "active")
+# 1. [Running] 현재 실행 여부 점검 (U_41_1)
+# systemd 서비스가 active 상태이거나, 프로세스가 메모리에 떠 있는지 확인 (OR 조건)
+SVC_ACTIVE=$(systemctl is-active autofs 2>/dev/null)
+PROC_CHECK=$(ps -ef | grep -v grep | grep -E "automount|autofs")
 
-if [[ -n "$AUTO_SVC_CHECK" ]]; then
+if [[ "$SVC_ACTIVE" == "active" ]] || [[ -n "$PROC_CHECK" ]]; then
     VULN_STATUS=1
     VULN_FLAGS+=("U_41_1")
-    echo -e "${RED}[취약]${NC} [systemd] automountd(autofs) 서비스가 활성화되어 있습니다."
+    echo -e "${RED}[취약]${NC} [Running] automountd(autofs) 서비스가 현재 실행 중입니다."
+    if [[ "$SVC_ACTIVE" == "active" ]]; then
+        echo "   -> Service State: active"
+    fi
+    if [[ -n "$PROC_CHECK" ]]; then
+        echo "   -> Process State: running"
+    fi
 fi
 
-# 2. [Process] 점검 (U_41_2) - PDF p.94
-# 실제 프로세스가 메모리에 떠 있는지 확인
-AUTO_PROC_CHECK=$(ps -ef | grep -v grep | grep -E "automount|autofs")
+# 2. [Boot] 부팅 시 자동 실행 설정 점검 (U_41_2)
+# systemctl is-enabled 명령어로 enabled 상태인지 확인
+SVC_ENABLED=$(systemctl is-enabled autofs 2>/dev/null)
 
-if [[ -n "$AUTO_PROC_CHECK" ]]; then
+if [[ "$SVC_ENABLED" == "enabled" ]]; then
     VULN_STATUS=1
-    # 플래그 중복 방지 (systemd와 process가 동시에 잡힐 수 있음)
-    [[ ! " ${VULN_FLAGS[@]} " =~ " U_41_1 " ]] && VULN_FLAGS+=("U_41_2")
-    echo -e "${RED}[취약]${NC} [Process] automount 관련 프로세스가 실행 중입니다."
+    VULN_FLAGS+=("U_41_2")
+    echo -e "${RED}[취약]${NC} [Boot] autofs 서비스가 부팅 시 자동 실행되도록 설정되어 있습니다."
 fi
 
 # 최종 결과 출력

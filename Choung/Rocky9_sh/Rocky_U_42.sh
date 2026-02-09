@@ -5,9 +5,9 @@
 # 가이드라인 출처 : KISA 주요정보통신기반시설 가이드 p.96-98
 # 자동 조치 가능 유무 : 가능
 # 플래그 설명:
-#   U_42_1 : [systemd/Process] rpcbind 또는 RPC 취약 서비스 활성화 발견
+#   U_42_1 : [inetd] inetd 설정 내 RPC 서비스 활성화 발견
 #   U_42_2 : [xinetd] xinetd 설정 내 RPC 서비스 활성화 발견
-#   U_42_3 : [inetd] inetd 설정 내 RPC 서비스 활성화 발견
+#   U_42_3 : [systemd/Process] rpcbind 또는 RPC 취약 서비스 활성화 발견
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -30,7 +30,7 @@ RPC_TARGETS=(
 # 정규식 생성 (grep -E 용)
 RPC_REGEX=$(IFS="|"; echo "${RPC_TARGETS[*]}")
 
-# 1. [systemd/Process] 점검 (U_42_1) - PDF p.97
+# 1. [systemd/Process] 점검 (U_42_3) - PDF p.97
 # [오탐 방지 수정] grep -w 옵션을 사용하여 'walld'가 'firewalld'에 매칭되지 않도록 함
 # 1차 필터링 후, awk 등으로 서비스명을 정확히 파싱하거나 grep -w로 재검증
 SYS_CHECK_RAW=$(systemctl list-units --type service,socket 2>/dev/null | grep -E "$RPC_REGEX" | grep -w "active")
@@ -59,7 +59,7 @@ done
 
 if [[ -n "$SYS_CHECK_FINAL" ]] || [[ -n "$PROC_CHECK" ]]; then
     VULN_STATUS=1
-    VULN_FLAGS+=("U_42_1")
+    VULN_FLAGS+=("U_42_3")
     echo -e "${RED}[취약]${NC} [systemd/Process] 불필요한 RPC 서비스가 활성화되어 있습니다."
     [[ -n "$SYS_CHECK_FINAL" ]] && echo "   -> Systemd 활성화: $SYS_CHECK_FINAL"
     [[ -n "$PROC_CHECK" ]] && echo "   -> Process 실행중: $PROC_CHECK"
@@ -75,12 +75,12 @@ if [[ -d "/etc/xinetd.d" ]]; then
     fi
 fi
 
-# 3. [inetd] 점검 (U_42_3) - PDF p.96
+# 3. [inetd] 점검 (U_42_1) - PDF p.96
 if [[ -f "/etc/inetd.conf" ]]; then
     INETD_CHECK=$(grep -v "^#" /etc/inetd.conf | grep -E "$RPC_REGEX")
     if [[ -n "$INETD_CHECK" ]]; then
         VULN_STATUS=1
-        VULN_FLAGS+=("U_42_3")
+        VULN_FLAGS+=("U_42_1")
         echo -e "${RED}[취약]${NC} [inetd] 설정에서 RPC 서비스가 활성화되어 있습니다."
     fi
 fi
