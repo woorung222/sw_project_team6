@@ -56,7 +56,7 @@ cat <<EOF
     "is_vul": $IS_VUL,
     "is_auto": 1,
     "category": "log",
-    "flags": {
+    "flag": {
       "U_67_1": $U_67_1
     },
     "timestamp": "$(date "+%Y_%m_%d / %H:%M:%S")"

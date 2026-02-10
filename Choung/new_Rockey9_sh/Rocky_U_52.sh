@@ -70,7 +70,7 @@ cat <<EOF
     "is_vul": $IS_VUL,
     "is_auto": 1,
     "category": "service",
-    "flags": {
+    "flag": {
       "U_52_1": $U_52_1,
       "U_52_2": $U_52_2,
       "U_52_3": $U_52_3,

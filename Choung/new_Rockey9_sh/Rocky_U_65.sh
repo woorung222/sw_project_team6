@@ -86,7 +86,7 @@ cat <<EOF
     "is_vul": $IS_VUL,
     "is_auto": 0,
     "category": "log",
-    "flags": {
+    "flag": {
       "U_65_1": $U_65_1,
       "U_65_2": $U_65_2,
       "U_65_3": $U_65_3

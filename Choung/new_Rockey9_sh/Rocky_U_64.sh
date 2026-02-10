@@ -59,7 +59,7 @@ cat <<EOF
     "is_vul": $IS_VUL,
     "is_auto": 0,
     "category": "patch",
-    "flags": {
+    "flag": {
       "U_64_1": $U_64_1,
       "U_64_2": $U_64_2
     },
