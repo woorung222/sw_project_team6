@@ -1,0 +1,133 @@
+---
+- name: "U-06 | Restrict su Command Usage"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    FLAG_ID: "U-06"
+    su_bin: "/usr/bin/su"
+    pam_su: "/etc/pam.d/su"
+    target_group: "wheel"
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-06 | init defaults"
+      ansible.builtin.set_fact:
+        r_group: {}
+        r_perm: {}
+        r_pam: {}
+      changed_when: false
+
+    # =========================================================
+    # 1. wheel 그룹 확인 및 생성
+    # =========================================================
+    - name: "U-06 | Ensure 'wheel' group exists"
+      ansible.builtin.group:
+        name: "{{ target_group }}"
+        state: present
+      register: r_group
+
+    # =========================================================
+    # 2. /usr/bin/su 권한 및 소유 그룹 설정
+    #    - Owner: root, Group: wheel
+    #    - Mode: 4750 (SetUID + rwx for owner + rx for group)
+    # =========================================================
+    - name: "U-06 | Configure /usr/bin/su permissions"
+      ansible.builtin.file:
+        path: "{{ su_bin }}"
+        owner: root
+        group: "{{ target_group }}"
+        mode: '4750'
+      register: r_perm
+      when: su_bin is file
+
+    # =========================================================
+    # 3. PAM 설정 (/etc/pam.d/su)
+    #    - auth required pam_wheel.so use_uid 활성화
+    # =========================================================
+    
+    # 3-1. 주석 처리된 라인이 있으면 주석 해제 (우선 순위)
+    - name: "U-06 | Uncomment pam_wheel.so in /etc/pam.d/su"
+      ansible.builtin.replace:
+        path: "{{ pam_su }}"
+        regexp: '^\s*#\s*(auth\s+required\s+pam_wheel\.so\s+use_uid.*)'
+        replace: '\1'
+      register: r_pam_uncomment
+      when: pam_su is file
+
+    # 3-2. 라인이 아예 없으면 추가 (주석 해제가 안 일어난 경우)
+    - name: "U-06 | Add pam_wheel.so to /etc/pam.d/su"
+      ansible.builtin.lineinfile:
+        path: "{{ pam_su }}"
+        line: "auth            required        pam_wheel.so use_uid"
+        state: present
+        # 보통 auth 관련 설정의 상단, 혹은 pam_rootok.so 다음에 위치하는 것이 좋음
+        # 여기서는 파일이 존재할 때만 추가
+        insertafter: 'pam_rootok.so' 
+      register: r_pam_add
+      when: 
+        - pam_su is file
+        - not (r_pam_uncomment.changed | default(false))
+
+    # =========================================================
+    # 4. 결과 로깅
+    # =========================================================
+    - name: "U-06 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "su 명령어 사용 제한 (wheel 그룹)",
+                  "cmd": "chgrp wheel /usr/bin/su; chmod 4750; pam_wheel.so enable",
+                  "result": "group_wheel=" ~ ((r_group.changed | default(false)) | bool | string) ~
+                            ", file_perm=" ~ ((r_perm.changed | default(false)) | bool | string) ~
+                            ", pam_config=" ~ (((r_pam_uncomment.changed | default(false)) or (r_pam_add.changed | default(false))) | bool | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-06 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "su 권한(4750/wheel) " ~
+                    ((r_perm.changed | default(false)) | ternary("설정됨", "이미 설정됨")) ~
+                    ", PAM(pam_wheel.so) " ~
+                    (((r_pam_uncomment.changed | default(false)) or (r_pam_add.changed | default(false))) | ternary("활성화됨", "이미 활성화됨"))
+                  ),
+                  "status": "양호"
+                } | to_json
+              }}
+          changed_when: false

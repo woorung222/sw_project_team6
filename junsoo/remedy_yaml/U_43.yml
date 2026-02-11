@@ -1,0 +1,86 @@
+---
+- name: "U-43 | Deactivate NIS Services (Logs-Only JSONL)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-43"
+    
+    # 점검 대상 NIS 서비스 목록
+    nis_services:
+      - ypserv
+      - ypbind
+      - ypxfrd
+      - rpc.yppasswdd
+      - rpc.ypupdated
+
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # 0. 초기화
+    # ---------------------------------------------------------
+    - name: "U-43 | init defaults"
+      ansible.builtin.set_fact:
+        r_nis_results: []
+      changed_when: false
+
+    # =========================================================
+    # 1. [Systemd] NIS 서비스 중지 및 비활성화
+    # - 서비스가 설치되지 않은 경우(failed) 무시하고 진행
+    # =========================================================
+    - name: "U-43 | [U_43_1] NIS 서비스 중지 및 비활성화"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop: "{{ nis_services }}"
+      register: r_nis_results
+      ignore_errors: yes 
+      # Rocky 9 등 최신 OS에는 NIS 패키지가 없어 에러가 날 수 있음 -> 무시 (양호 간주)
+
+    # =========================================================
+    # 2. 결과 집계 및 로그 기록
+    # =========================================================
+    - name: "U-43 | [U_43_1] 조치 결과 집계 및 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_43
+          changed_when: false
+
+        - name: "변경된(조치된) 서비스 목록 추출"
+          ansible.builtin.set_fact:
+            # 결과 중 'failed'가 아니고(설치됨), 'changed'가 true인(조치됨) 항목만 추출
+            changed_nis: >-
+              {{
+                r_nis_results.results 
+                | selectattr('failed', 'equalto', false) 
+                | selectattr('changed', 'equalto', true) 
+                | map(attribute='item') 
+                | list 
+              }}
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_43.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    (changed_nis | length > 0) | ternary(
+                       "[U-43] 조치된 NIS 서비스: " ~ (changed_nis | join(", ")),
+                       "[U-43] 활성화된 NIS 서비스가 발견되지 않음(서비스 미설치 또는 이미 비활성)"
+                    )
+                  ),
+                  "status": ((changed_nis | length > 0) | ternary("취약", "양호"))
+                } | to_json
+              }}
+          changed_when: false

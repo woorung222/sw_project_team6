@@ -1,0 +1,140 @@
+---
+- name: "U-07 | Remove Unnecessary Accounts"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-07"
+    
+    # 삭제 대상 기본 계정 목록 (Rocky_U_07.txt 기준)
+    # 주의: 사용 중인 서비스(예: ftp, lp)가 있다면 리스트에서 제거해야 함
+    target_users:
+      - lp
+      - uucp
+      - games
+      - gopher
+      - ftp
+      - news
+
+    # 장기 미사용 기준 (일)
+    idle_days: 90
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-07 | init defaults"
+      ansible.builtin.set_fact:
+        r_userdel: []
+        idle_accounts: []
+      changed_when: false
+
+    # =========================================================
+    # 1. 기본 불필요 계정 삭제
+    # =========================================================
+    - name: "U-07 | Remove default unnecessary accounts"
+      ansible.builtin.user:
+        name: "{{ item }}"
+        state: absent
+        remove: yes  # 홈 디렉토리까지 삭제 (-r 옵션)
+        force: yes
+      loop: "{{ target_users }}"
+      register: r_userdel
+      # 계정이 없어 삭제되지 않은 경우 에러 아님
+      failed_when: false 
+
+    # =========================================================
+    # 2. 장기 미사용 계정 식별 (Audit Only)
+    #    - 자동 삭제하지 않고 목록만 추출하여 로그에 기록
+    # =========================================================
+    - name: "U-07 | Identify long-idle accounts (Audit)"
+      ansible.builtin.shell: |
+        # lastlog -b [days] : days일 이전에 접속한 계정 출력
+        # awk로 계정명만 추출 (첫줄 헤더 제외, 시스템 계정 제외 로직 필요하나 간단히 리스트업)
+        lastlog -b {{ idle_days }} 2>/dev/null | awk 'NR>1 {print $1}'
+      register: r_idle_check
+      changed_when: false
+      failed_when: false
+
+    - name: "U-07 | Filter idle accounts (UID >= 1000)"
+      # 추출된 계정 중 실제 UID 1000 이상인 일반 사용자만 필터링
+      ansible.builtin.shell: |
+        for user in {{ r_idle_check.stdout_lines | join(' ') }}; do
+          uid=$(id -u "$user" 2>/dev/null)
+          if [ -n "$uid" ] && [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
+            echo "$user"
+          fi
+        done
+      register: r_idle_filtered
+      changed_when: false
+      # 필터링 로직이므로 shell 모듈 사용
+
+    - name: "U-07 | Set idle accounts fact"
+      ansible.builtin.set_fact:
+        idle_accounts: "{{ r_idle_filtered.stdout_lines | default([]) }}"
+      changed_when: false
+
+    # =========================================================
+    # 3. 결과 로깅
+    # =========================================================
+    - name: "U-07 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        # 삭제된 계정 목록 추출
+        - name: "Extract deleted users"
+          set_fact:
+            deleted_users: "{{ r_userdel.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list }}"
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "불필요 계정 삭제 및 미사용 계정 식별",
+                  "cmd": "userdel [default_accounts]; lastlog -b 90 (audit)",
+                  "result": "deleted=" ~ (deleted_users | join(", ") if (deleted_users | length > 0) else "None") ~
+                            ", idle_detected=" ~ (idle_accounts | join(", ") if (idle_accounts | length > 0) else "None (Auto-deletion skipped)")
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-07 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "기본 계정(" ~ (target_users | length | string) ~ "개) 점검 완료(" ~ 
+                    ((deleted_users | length > 0) | ternary((deleted_users | join(",")) ~ " 삭제됨", "삭제 대상 없음")) ~ 
+                    "), 장기 미사용 계정 " ~ 
+                    ((idle_accounts | length > 0) | ternary((idle_accounts | length | string) ~ "개 식별됨(수동조치 필요)", "없음"))
+                  ),
+                  "status": ((idle_accounts | length > 0) | ternary("취약(수동조치필요)", "양호"))
+                } | to_json
+              }}
+          changed_when: false

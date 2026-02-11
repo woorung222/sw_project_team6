@@ -1,0 +1,180 @@
+---
+- name: "U-01 | Restrict Root Remote Access (SSH/Telnet)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-01"
+    
+    # 설정 파일 경로 정의
+    sshd_config: "/etc/ssh/sshd_config"
+    pam_login: "/etc/pam.d/login"
+    securetty: "/etc/securetty"
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-01 | init defaults"
+      ansible.builtin.set_fact:
+        r_sshd_config: {}
+        r_sshd_restart: {}
+        r_securetty: {}
+        r_pam: {}
+      changed_when: false
+
+    # =========================================================
+    # 1. SSH 조치: PermitRootLogin No 설정
+    # =========================================================
+    
+    # 1-1. sshd_config 파일 존재 확인 및 조치
+    - name: "U-01 | [SSH] PermitRootLogin no 설정"
+      ansible.builtin.replace:
+        path: "{{ sshd_config }}"
+        # 주석(#) 여부 관계없이 PermitRootLogin 설정 라인을 찾음
+        regexp: '^(?i)\s*#?\s*PermitRootLogin\s+.*'
+        replace: 'PermitRootLogin no'
+        backup: yes
+      register: r_sshd_config
+      when: sshd_config is file
+
+    # 1-2. 파일 내에 PermitRootLogin 설정이 아예 없었을 경우 (append)
+    - name: "U-01 | [SSH] PermitRootLogin no 추가 (설정 없을 시)"
+      ansible.builtin.lineinfile:
+        path: "{{ sshd_config }}"
+        line: "PermitRootLogin no"
+        state: present
+        create: no
+      when: 
+        - sshd_config is file
+        - r_sshd_config.msg is defined and "pattern not found" in r_sshd_config.msg
+      register: r_sshd_config_add
+
+    # 1-3. SSH 조치 결과 로깅
+    - name: "U-01 | [SSH] 조치 로그 기록"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_ssh
+          changed_when: false
+
+        - name: "LOG step (SSH)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_ssh.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[SSH] PermitRootLogin 설정 변경",
+                  "cmd": "replace/lineinfile: path=" ~ sshd_config ~ " line='PermitRootLogin no'",
+                  "result": "changed=" ~ (((r_sshd_config.changed | default(false)) or (r_sshd_config_add.changed | default(false))) | bool | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    # 1-4. SSH 서비스 재시작 (설정이 변경된 경우에만)
+    - name: "U-01 | [SSH] 서비스 재시작"
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
+      when: (r_sshd_config.changed | default(false)) or (r_sshd_config_add.changed | default(false))
+      register: r_sshd_restart
+      failed_when: false
+
+    # =========================================================
+    # 2. Telnet 조치: securetty 및 pam.d/login 설정
+    # =========================================================
+
+    # 2-1. /etc/securetty 내 pts/x 주석 처리
+    # (참고: Ubuntu 20.04+ 등 최신 OS는 securetty 파일이 없을 수 있음. 파일이 있을 때만 수행)
+    - name: "U-01 | [Telnet] securetty 내 pts 라인 주석 처리"
+      ansible.builtin.replace:
+        path: "{{ securetty }}"
+        regexp: '^(pts/\d+)'
+        replace: '#\1'
+        backup: yes
+      register: r_securetty
+      when: securetty is file
+
+    # 2-2. /etc/pam.d/login 내 pam_securetty.so 모듈 추가
+    # (이미 설정되어 있는지 확인 후 없으면 상단에 추가)
+    - name: "U-01 | [Telnet] pam.d/login 내 pam_securetty.so 추가"
+      ansible.builtin.lineinfile:
+        path: "{{ pam_login }}"
+        # 주석이 아닌 라인 중 pam_securetty.so가 있는지 확인
+        regexp: '^\s*auth\s+required\s+.*pam_securetty\.so'
+        line: 'auth required pam_securetty.so'
+        state: present
+        insertbefore: BOF
+        backup: yes
+      register: r_pam
+      when: pam_login is file
+
+    # 2-3. Telnet 조치 결과 로깅
+    - name: "U-01 | [Telnet] 조치 로그 기록"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_telnet
+          changed_when: false
+
+        - name: "LOG step (Telnet)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_telnet.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[Telnet] 접속 제한 설정 (securetty/pam)",
+                  "cmd": "securetty 주석 처리 및 pam.d/login 모듈 추가",
+                  "result": "securetty_changed=" ~ ((r_securetty.changed | default(false)) | bool | string) ~
+                            ", pam_changed=" ~ ((r_pam.changed | default(false)) | bool | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # 3. 최종 결과 보고 (Basis Log)
+    # =========================================================
+    - name: "U-01 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "SSH: PermitRootLogin no " ~
+                    (((r_sshd_config.changed | default(false)) or (r_sshd_config_add.changed | default(false))) | ternary("적용됨", "이미 적용됨")) ~
+                    ", 서비스 재시작 " ~ ((r_sshd_restart.changed | default(false)) | ternary("완료", "불필요")) ~
+                    " / Telnet: 설정 " ~
+                    (((r_securetty.changed | default(false)) or (r_pam.changed | default(false))) | ternary("강화됨", "이미 양호함"))
+                  ),
+                  "status": (
+                    ((r_sshd_config.changed | default(false)) or 
+                     (r_sshd_config_add.changed | default(false)) or 
+                     (r_securetty.changed | default(false)) or 
+                     (r_pam.changed | default(false))) 
+                    | ternary("취약(조치완료)", "양호")
+                  )
+                } | to_json
+              }}
+          changed_when: false

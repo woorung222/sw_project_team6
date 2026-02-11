@@ -1,0 +1,255 @@
+---
+- name: "U-36 | Remediate r-command Services (Rocky/Ubuntu)"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    FLAG_ID: "U-36"
+    inetd_conf: "/etc/inetd.conf"
+    xinetd_dir: "/etc/xinetd.d"
+    
+    # r-command 관련 패키지 목록 (OS별)
+    # 진단 스크립트가 패키지 존재 시 취약으로 판단하므로 삭제 필요
+    r_pkgs_rocky:
+      - rsh
+      - rsh-server
+      - rlogin
+      - rexec
+      - rexec-server
+    r_pkgs_ubuntu:
+      - rsh-server
+      - rsh-client
+      - rlogin
+      - rexec
+
+    # Logging Vars
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    - name: "U-36 | init defaults"
+      ansible.builtin.set_fact:
+        r_inetd: {}
+        r_xinetd_rsh: {}
+        r_xinetd_rlogin: {}
+        r_xinetd_rexec: {}
+        r_systemd: {}
+        r_pkg: {}
+      changed_when: false
+
+    # =========================================================
+    # 1. inetd 설정 점검 (/etc/inetd.conf)
+    # - shell, login, exec, rsh, rlogin, rexec 주석 처리
+    # =========================================================
+    - name: "U-36 | [U_36_1] inetd.conf r-command 주석 처리"
+      ansible.builtin.replace:
+        path: "{{ inetd_conf }}"
+        # rsh, rlogin, rexec, shell, login, exec 행을 찾아 주석 처리 (이미 주석된 것 제외)
+        regexp: '^(?![[:space:]]*#)([[:space:]]*(rsh|rlogin|rexec|shell|login|exec)[[:space:]].*)$'
+        replace: '# \1'
+      register: r_inetd
+      when: inetd_conf is file
+
+    - name: "U-36 | [U_36_1] inetd 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_36_1
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_36_1.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_36_1] inetd.conf 내 r-command 주석 처리",
+                  "cmd": "replace: rsh|rlogin|rexec|shell|login|exec -> comment out",
+                  "result": "changed=" ~ (((r_inetd.changed | default(false)) | bool) | string)
+                } | to_json
+              }}
+          changed_when: false
+      when: inetd_conf is file
+
+    # =========================================================
+    # 2. xinetd 설정 점검 (/etc/xinetd.d/{rsh,rlogin,rexec})
+    # - 해당 파일들이 존재하면 disable = yes 설정
+    # =========================================================
+    - name: "U-36 | [U_36_2] xinetd r-command disable=yes 설정"
+      ansible.builtin.lineinfile:
+        path: "{{ item.path }}"
+        regexp: '^[[:space:]]*disable[[:space:]]*='
+        line: '        disable = yes'
+        state: present
+      loop:
+        - { path: "{{ xinetd_dir }}/rsh", name: "rsh" }
+        - { path: "{{ xinetd_dir }}/rlogin", name: "rlogin" }
+        - { path: "{{ xinetd_dir }}/rexec", name: "rexec" }
+        - { path: "{{ xinetd_dir }}/shell", name: "shell" }
+        - { path: "{{ xinetd_dir }}/login", name: "login" }
+        - { path: "{{ xinetd_dir }}/exec", name: "exec" }
+      register: r_xinetd_loop
+      failed_when: false 
+      # 파일이 없으면 실패하므로 무시 (일반적 상황)
+
+    - name: "U-36 | [U_36_2] xinetd 조치 결과 확인 (Aggregate)"
+      ansible.builtin.set_fact:
+        xinetd_changed: "{{ r_xinetd_loop.results | selectattr('changed', 'equalto', true) | list | length > 0 }}"
+      changed_when: false
+
+    - name: "U-36 | [U_36_2] xinetd 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_36_2
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_36_2.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_36_2] xinetd 내 r-command 서비스 비활성화",
+                  "cmd": "lineinfile: disable=yes (target: rsh, rlogin, rexec, shell, login, exec)",
+                  "result": "changed=" ~ (xinetd_changed | string)
+                } | to_json
+              }}
+          changed_when: false
+      when: xinetd_dir is directory
+
+    # =========================================================
+    # 3. systemd 서비스 중지 및 비활성화
+    # - rsh.socket, rlogin.socket, rexec.socket 등
+    # =========================================================
+    - name: "U-36 | [U_36_3] systemd r-command 서비스 중지 (Best Effort)"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - rsh.socket
+        - rlogin.socket
+        - rexec.socket
+        - rsh.service
+        - rlogin.service
+        - rexec.service
+      register: r_systemd_loop
+      failed_when: false
+      ignore_errors: yes
+
+    - name: "U-36 | [U_36_3] systemd 조치 결과 확인"
+      ansible.builtin.set_fact:
+        systemd_changed: "{{ r_systemd_loop.results | selectattr('changed', 'equalto', true) | list | length > 0 }}"
+      changed_when: false
+
+    - name: "U-36 | [U_36_3] systemd 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_36_3
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_36_3.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_36_3] systemd r-command 서비스 중지/비활성화",
+                  "cmd": "systemctl stop/disable (rsh, rlogin, rexec sockets/services)",
+                  "result": "changed=" ~ (systemd_changed | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # 4. 패키지 삭제 (U_36_4 대응)
+    # - 진단 스크립트가 rpm -qa, dpkg -l 로 패키지 존재를 검사하므로 삭제 필요
+    # =========================================================
+    - name: "U-36 | [U_36_4] r-command 관련 패키지 삭제 (Rocky)"
+      ansible.builtin.dnf:
+        name: "{{ r_pkgs_rocky }}"
+        state: absent
+      register: r_pkg_rocky
+      when: ansible_distribution == "Rocky" or ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: "U-36 | [U_36_4] r-command 관련 패키지 삭제 (Ubuntu)"
+      ansible.builtin.apt:
+        name: "{{ r_pkgs_ubuntu }}"
+        state: absent
+        purge: yes
+      register: r_pkg_ubuntu
+      when: ansible_distribution == "Ubuntu" or ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: "U-36 | [U_36_4] 패키지 삭제 결과 병합"
+      ansible.builtin.set_fact:
+        pkg_changed: "{{ (r_pkg_rocky.changed | default(false)) or (r_pkg_ubuntu.changed | default(false)) }}"
+      changed_when: false
+
+    - name: "U-36 | [U_36_4] 패키지 삭제 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_36_4
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_36_4.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_36_4] r-command 관련 패키지 삭제",
+                  "cmd": "dnf/apt remove rsh, rlogin, rexec ...",
+                  "result": "changed=" ~ (pkg_changed | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # Final Basis Log (종합 결과)
+    # =========================================================
+    - name: "U-36 | Final Basis Log"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_36_final
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_36_final.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "r-command 조치 결과: "
+                    ~ (((r_inetd.changed | default(false)) | bool) | ternary("inetd 주석 처리됨, ", "inetd 양호/미사용, "))
+                    ~ ((xinetd_changed | bool) | ternary("xinetd 비활성 완료, ", "xinetd 양호/미사용, "))
+                    ~ ((systemd_changed | bool) | ternary("서비스 중지됨, ", "서비스 미구동, "))
+                    ~ ((pkg_changed | bool) | ternary("패키지 삭제됨", "패키지 미설치/이미 삭제됨"))
+                  ),
+                  "status": (
+                      ((r_inetd.changed or xinetd_changed or systemd_changed or pkg_changed) | bool)
+                      | ternary("취약(조치됨)", "양호")
+                  )
+                } | to_json
+              }}
+          changed_when: false

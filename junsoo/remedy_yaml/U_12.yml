@@ -1,0 +1,124 @@
+---
+- name: "U-12 | Session Timeout Configuration"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    FLAG_ID: "U-12"
+    
+    # 설정 파일 경로
+    profile_file: "/etc/profile"
+    csh_file: "/etc/csh.cshrc" # Rocky/Ubuntu 공통적으로 csh 설정에 사용됨 (없을 수도 있음)
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-12 | init defaults"
+      ansible.builtin.set_fact:
+        r_tmout: {}
+        r_tmout_export: {}
+        r_csh: {}
+      changed_when: false
+
+    # =========================================================
+    # 1. Bash/Sh: /etc/profile 설정 (TMOUT=600)
+    # =========================================================
+    
+    # 1-1. TMOUT 값 설정 (수정 또는 추가)
+    - name: "U-12 | [Bash] Configure TMOUT=600 in /etc/profile"
+      ansible.builtin.lineinfile:
+        path: "{{ profile_file }}"
+        # TMOUT=숫자 형태가 있으면 600으로 변경
+        regexp: '^\s*TMOUT\s*=\s*\d+'
+        line: 'TMOUT=600'
+        state: present
+        create: no
+      register: r_tmout
+      when: profile_file is file
+
+    # 1-2. export TMOUT 설정 (없으면 추가)
+    - name: "U-12 | [Bash] Ensure 'export TMOUT' exists"
+      ansible.builtin.lineinfile:
+        path: "{{ profile_file }}"
+        regexp: '^\s*export\s+TMOUT'
+        line: 'export TMOUT'
+        state: present
+        insertafter: '^\s*TMOUT\s*='
+      register: r_tmout_export
+      when: profile_file is file
+
+    # =========================================================
+    # 2. Csh: /etc/csh.cshrc 설정 (autologout=10)
+    #    - 파일이 존재하는 경우에만 수행 (csh 미설치 시 파일 없을 수 있음)
+    # =========================================================
+    - name: "U-12 | [Csh] Configure autologout=10"
+      ansible.builtin.lineinfile:
+        path: "{{ csh_file }}"
+        regexp: '^\s*set\s+autologout\s*='
+        line: 'set autologout=10'
+        state: present
+        create: no
+      register: r_csh
+      # 파일이 존재할 때만 실행
+      when: csh_file is file
+
+    # =========================================================
+    # 3. 결과 로깅
+    # =========================================================
+    - name: "U-12 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "세션 타임아웃 설정 (Bash:600초, Csh:10분)",
+                  "cmd": "lineinfile: /etc/profile (TMOUT=600), /etc/csh.cshrc (autologout=10)",
+                  "result": "bash_tmout=" ~ ((r_tmout.changed | default(false)) | bool | string) ~
+                            ", csh_autologout=" ~ ((r_csh.changed | default(false)) | bool | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-12 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "Bash(TMOUT=600) " ~
+                    (((r_tmout.changed | default(false)) or (r_tmout_export.changed | default(false))) | ternary("설정됨", "이미 설정됨")) ~
+                    ", Csh " ~
+                    ((r_csh.changed | default(false)) | ternary("설정됨", "해당없음/이미 설정됨"))
+                  ),
+                  "status": "양호"
+                } | to_json
+              }}
+          changed_when: false

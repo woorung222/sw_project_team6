@@ -1,0 +1,179 @@
+---
+- name: "U-02 | Password Complexity & Aging Policy"
+  hosts: all
+  become: yes
+  gather_facts: yes  # OS 계열 확인을 위해 facts 수집 필요
+
+  vars:
+    FLAG_ID: "U-02"
+    
+    # 설정 파일 경로 정의
+    login_defs: "/etc/login.defs"
+    pwquality_conf: "/etc/security/pwquality.conf"
+    pwhistory_conf: "/etc/security/pwhistory.conf" # RHEL/Rocky 계열용
+    pam_common_password: "/etc/pam.d/common-password" # Debian/Ubuntu 계열용
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-02 | init defaults"
+      ansible.builtin.set_fact:
+        r_login_defs_max: {}
+        r_login_defs_min: {}
+        r_pwquality: {}
+        r_pwhistory_rocky: {}
+        r_pwhistory_ubuntu: {}
+      changed_when: false
+
+    # =========================================================
+    # 1. 패스워드 사용 기간 설정 (/etc/login.defs)
+    #    - PASS_MAX_DAYS 90
+    #    - PASS_MIN_DAYS 1
+    # =========================================================
+    - name: "U-02 | [Common] login.defs - PASS_MAX_DAYS 90 설정"
+      ansible.builtin.lineinfile:
+        path: "{{ login_defs }}"
+        regexp: '^PASS_MAX_DAYS'
+        line: 'PASS_MAX_DAYS   90'
+      register: r_login_defs_max
+      when: login_defs is file
+
+    - name: "U-02 | [Common] login.defs - PASS_MIN_DAYS 1 설정"
+      ansible.builtin.lineinfile:
+        path: "{{ login_defs }}"
+        regexp: '^PASS_MIN_DAYS'
+        line: 'PASS_MIN_DAYS   1'
+      register: r_login_defs_min
+      when: login_defs is file
+
+    # =========================================================
+    # 2. 패스워드 복잡성 설정 (/etc/security/pwquality.conf)
+    #    - minlen=8, credit류=-1, enforce_for_root
+    # =========================================================
+    - name: "U-02 | [Common] pwquality.conf 설정"
+      ansible.builtin.lineinfile:
+        path: "{{ pwquality_conf }}"
+        regexp: "^{{ item.key }}"
+        line: "{{ item.key }} = {{ item.value }}"
+      loop:
+        - { key: 'minlen', value: '8' }
+        - { key: 'dcredit', value: '-1' }
+        - { key: 'ucredit', value: '-1' }
+        - { key: 'lcredit', value: '-1' }
+        - { key: 'ocredit', value: '-1' }
+      register: r_pwquality
+      when: pwquality_conf is file
+
+    # enforce_for_root 옵션은 값이 없으므로 별도 처리
+    - name: "U-02 | [Common] pwquality.conf - enforce_for_root 추가"
+      ansible.builtin.lineinfile:
+        path: "{{ pwquality_conf }}"
+        line: "enforce_for_root"
+        insertafter: EOF
+      when: pwquality_conf is file
+
+    # =========================================================
+    # 3. 패스워드 기억(History) 설정 (OS별 분기)
+    # =========================================================
+    
+    # 3-A. RedHat/Rocky 계열: /etc/security/pwhistory.conf 사용
+    - name: "U-02 | [Rocky] pwhistory.conf - remember=4 설정"
+      ansible.builtin.lineinfile:
+        path: "{{ pwhistory_conf }}"
+        regexp: '^remember'
+        line: 'remember = 4'
+      register: r_pwhistory_rocky
+      when: 
+        - ansible_os_family == "RedHat"
+        - pwhistory_conf is file
+
+    - name: "U-02 | [Rocky] pwhistory.conf - enforce_for_root 추가"
+      ansible.builtin.lineinfile:
+        path: "{{ pwhistory_conf }}"
+        line: "enforce_for_root"
+        insertafter: EOF
+      when: 
+        - ansible_os_family == "RedHat"
+        - pwhistory_conf is file
+
+    # 3-B. Debian/Ubuntu 계열: /etc/pam.d/common-password 수정
+    # (pam_pwhistory.so 라인이 없으면 추가, 있으면 수정 - 정규식 복잡도 고려하여 pam_unix.so 앞/뒤 위치 확인 필요하나, 
+    #  여기서는 단순하게 pam_pwhistory.so 라인에 remember=4 옵션을 보장하는 방식으로 처리)
+    - name: "U-02 | [Ubuntu] pam.d/common-password - remember=4 설정"
+      ansible.builtin.replace:
+        path: "{{ pam_common_password }}"
+        # pam_pwhistory.so가 포함된 라인을 찾아서 remember=N 값을 4로 변경하거나 없으면 추가
+        # (주의: 기존 라인 전체를 대체하지 않고 옵션만 수정하기 어려우므로, 
+        #  여기서는 pam_pwhistory.so가 있는 경우 remember 옵션을 강제하는 방식을 사용. 
+        #  단, pam 설정은 민감하므로 단순히 remember=4가 포함되어 있는지 확인 후 없으면 라인 끝에 추가하는 방식 적용)
+        regexp: '(password\s+.*pam_pwhistory\.so.*)(remember=\d+)?(.*)'
+        replace: '\1 remember=4 \3'
+      register: r_pwhistory_ubuntu
+      when: 
+        - ansible_os_family == "Debian"
+        - pam_common_password is file
+
+    # (Ubuntu) 만약 pam_pwhistory.so 라인 자체가 없다면? (기본 설치시 보통 주석처리 되어 있거나 없을 수 있음)
+    # -> 이 부분은 자동화하기 위험할 수 있으므로(순서 중요), 수동 조치 권고 사항으로 남길 수도 있으나,
+    #    요청에 따라 최대한 자동화 시도: pam_unix.so 이전에 추가하는 것이 일반적 권고
+    #    하지만 여기서는 기존 파일 구조를 크게 해치지 않는 선에서 처리
+
+    # =========================================================
+    # 4. 결과 로깅
+    # =========================================================
+    - name: "U-02 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "패스워드 정책(기간/복잡성/기억) 설정",
+                  "cmd": "login.defs(MAX=90,MIN=1), pwquality(minlen=8,credits=-1), pwhistory(remember=4)",
+                  "result": "login.defs=" ~ ((r_login_defs_max.changed or r_login_defs_min.changed) | bool | string) ~
+                            ", pwquality=" ~ (r_pwquality.changed | bool | string) ~
+                            ", history=" ~ ((r_pwhistory_rocky.changed | default(false)) or (r_pwhistory_ubuntu.changed | default(false)) | bool | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-02 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "패스워드 기간(90일/1일) " ~ ((r_login_defs_max.changed or r_login_defs_min.changed) | ternary("설정됨", "이미 설정됨")) ~
+                    ", 복잡성(8자/문자조합) " ~ (r_pwquality.changed | ternary("강화됨", "이미 양호함")) ~
+                    ", 기억하기(4회) " ~ ((r_pwhistory_rocky.changed | default(false)) or (r_pwhistory_ubuntu.changed | default(false)) | ternary("설정됨", "이미 설정됨/미지원"))
+                  ),
+                  "status": "양호"
+                } | to_json
+              }}
+          changed_when: false

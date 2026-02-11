@@ -1,0 +1,125 @@
+---
+- name: "U-11 | Restrict System Account Shells"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    FLAG_ID: "U-11"
+
+    # 점검 대상 계정 목록 (가이드 기준)
+    target_accounts:
+      - daemon
+      - bin
+      - sys
+      - adm
+      - listen
+      - nobody
+      - nobody4
+      - noaccess
+      - diag
+      - operator
+      - games
+      - gopher
+
+    # OS별 nologin 쉘 경로 설정
+    nologin_shell: "{{ '/sbin/nologin' if ansible_os_family == 'RedHat' else '/usr/sbin/nologin' }}"
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-11 | init defaults"
+      ansible.builtin.set_fact:
+        modified_accounts: []
+        existing_accounts: []
+      changed_when: false
+
+    # =========================================================
+    # 1. 진단 및 대상 식별: 시스템에 실제 존재하는 계정 확인
+    #    (존재하지 않는 계정을 수정하려고 하면 에러 발생하므로 필터링)
+    # =========================================================
+    - name: "U-11 | Check if target accounts exist"
+      ansible.builtin.shell: "getent passwd {{ item }} | cut -d: -f1"
+      loop: "{{ target_accounts }}"
+      register: r_check_users
+      changed_when: false
+      failed_when: false # 계정이 없어도 에러 아님
+
+    - name: "U-11 | Filter existing accounts"
+      ansible.builtin.set_fact:
+        existing_accounts: "{{ r_check_users.results | selectattr('rc', 'equalto', 0) | map(attribute='stdout') | list }}"
+      changed_when: false
+
+    # =========================================================
+    # 2. 조치: 쉘 변경 (nologin)
+    # =========================================================
+    - name: "U-11 | Change shell to nologin for existing accounts"
+      ansible.builtin.user:
+        name: "{{ item }}"
+        shell: "{{ nologin_shell }}"
+      loop: "{{ existing_accounts }}"
+      register: r_usermod
+      when: existing_accounts | length > 0
+
+    # =========================================================
+    # 3. 결과 로깅
+    # =========================================================
+    - name: "U-11 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        # 실제로 변경된 계정 목록 추출
+        - name: "Extract modified users"
+          set_fact:
+            changed_list: "{{ r_usermod.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list }}"
+            
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "시스템 계정 Shell 로그인 차단 설정",
+                  "cmd": "usermod -s " ~ nologin_shell ~ " [account]",
+                  "result": "targets=" ~ (existing_accounts | join(", ") if (existing_accounts | length > 0) else "None") ~
+                            ", modified=" ~ (changed_list | join(", ") if (changed_list | length > 0) else "None")
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-11 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "발견된 시스템 계정(" ~ (existing_accounts | length | string) ~ "개) 쉘 점검 완료. " ~
+                    ((changed_list | length > 0) | ternary((changed_list | join(", ")) ~ " 계정의 쉘을 " ~ nologin_shell ~ "로 변경함", "모든 대상 계정이 이미 안전한 쉘을 사용 중임"))
+                  ),
+                  "status": ((changed_list | length > 0) | ternary("취약(조치완료)", "양호"))
+                } | to_json
+              }}
+          changed_when: false

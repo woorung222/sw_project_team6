@@ -1,0 +1,111 @@
+---
+- name: "U-09 | Check for Empty Groups (Audit Only)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-09"
+    # 일반 사용자 그룹 시작 GID (보통 1000)
+    MIN_GID: 1000
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-09 | init defaults"
+      ansible.builtin.set_fact:
+        empty_groups: []
+      changed_when: false
+
+    # =========================================================
+    # 1. 진단: 빈 그룹 식별 (Shell Script 로직 구현)
+    # =========================================================
+    - name: "U-09 | Identify empty groups (GID >= {{ MIN_GID }})"
+      ansible.builtin.shell: |
+        # 1. 현재 사용 중인 Primary GID 목록 추출 (중복 제거)
+        PRIMARY_GIDS=$(cut -d: -f4 /etc/passwd | sort -u)
+
+        # 2. /etc/group 파일을 한 줄씩 읽으며 점검
+        while IFS=: read -r G_NAME G_PASS G_GID G_MEMBERS; do
+            # GID가 숫자가 아니거나 1000 미만이면 건너뜀
+            if ! [[ "$G_GID" =~ ^[0-9]+$ ]] || [ "$G_GID" -lt {{ MIN_GID }} ]; then
+                continue
+            fi
+
+            # 1) 보조 그룹원(G_MEMBERS)이 비어있는지 확인
+            if [ -z "$G_MEMBERS" ]; then
+                # 2) Primary GID로 사용되고 있는지 확인 (grep -w로 정확한 매칭)
+                if ! echo "$PRIMARY_GIDS" | grep -q -w "$G_GID"; then
+                    # 아무도 사용하지 않는 빈 그룹 출력
+                    echo "$G_NAME($G_GID)"
+                fi
+            fi
+        done < /etc/group
+      register: r_check_empty
+      changed_when: false
+      failed_when: false
+
+    - name: "U-09 | Set empty groups fact"
+      ansible.builtin.set_fact:
+        empty_groups: "{{ r_check_empty.stdout_lines | default([]) }}"
+      changed_when: false
+
+    # =========================================================
+    # 2. 결과 로깅 (Audit Only)
+    # =========================================================
+    - name: "U-09 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "빈 그룹(Empty Group) 점검 (수동 조치 필요)",
+                  "cmd": "Check /etc/group & /etc/passwd for unused GIDs >= 1000",
+                  "result": "empty_groups_count=" ~ (empty_groups | length | string) ~
+                            ", detected=" ~ (empty_groups | join(", ") if (empty_groups | length > 0) else "None")
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-09 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    (empty_groups | length > 0) | ternary(
+                      "불필요 빈 그룹 발견: " ~ (empty_groups | join(", ")) ~ " (수동 검토 및 삭제 필요)",
+                      "계정이 없는 빈 그룹이 존재하지 않음"
+                    )
+                  ),
+                  "status": ((empty_groups | length > 0) | ternary("취약(수동조치필요)", "양호"))
+                } | to_json
+              }}
+          changed_when: false

@@ -1,0 +1,196 @@
+---
+- name: "U-38 | Remediate DoS Vulnerable Services (Simple TCP/IP)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-38"
+    
+    # 조치 대상 서비스 (Legacy)
+    # NTP, DNS, SMTP, SNMP는 장애 위험으로 제외함
+    target_services:
+      - echo
+      - discard
+      - daytime
+      - chargen
+
+    # 설정 파일 경로
+    inetd_conf: "/etc/inetd.conf"
+    xinetd_dir: "/etc/xinetd.d"
+
+    # 로깅 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    - name: "U-38 | init defaults"
+      ansible.builtin.set_fact:
+        r_inetd: {}
+        r_xinetd: {}
+        r_systemd: {}
+        xinetd_changed: false
+        systemd_changed: false
+      changed_when: false
+
+    # =========================================================
+    # 1. inetd 설정 점검 (/etc/inetd.conf)
+    # - echo, discard, daytime, chargen 주석 처리
+    # =========================================================
+    - name: "U-38 | [U_38_1] inetd.conf 내 DoS 취약 서비스 주석 처리"
+      ansible.builtin.replace:
+        path: "{{ inetd_conf }}"
+        regexp: '^(?![[:space:]]*#)([[:space:]]*(echo|discard|daytime|chargen)[[:space:]].*)$'
+        replace: '# \1'
+      register: r_inetd
+      when: inetd_conf is file
+
+    - name: "U-38 | [U_38_1] inetd 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_38_1
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_38_1.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_38_1] inetd.conf 내 Simple Service 주석 처리",
+                  "cmd": "replace: echo|discard|daytime|chargen -> comment out",
+                  "result": "changed=" ~ (((r_inetd.changed | default(false)) | bool) | string)
+                } | to_json
+              }}
+          changed_when: false
+      when: inetd_conf is file
+
+    # =========================================================
+    # 2. xinetd 설정 점검 (/etc/xinetd.d/)
+    # - echo, discard, daytime, chargen 파일이 있으면 disable = yes
+    # =========================================================
+    - name: "U-38 | [U_38_2] xinetd 내 Simple Service 비활성화"
+      ansible.builtin.lineinfile:
+        path: "{{ xinetd_dir }}/{{ item }}"
+        regexp: '^[[:space:]]*disable[[:space:]]*='
+        line: '        disable = yes'
+        state: present
+      loop: "{{ target_services }}"
+      register: r_xinetd_loop
+      failed_when: false # 파일이 없으면 무시
+
+    - name: "U-38 | [U_38_2] xinetd 조치 결과 집계"
+      ansible.builtin.set_fact:
+        xinetd_changed: "{{ r_xinetd_loop.results | selectattr('changed', 'equalto', true) | list | length > 0 }}"
+      changed_when: false
+
+    - name: "U-38 | [U_38_2] xinetd 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_38_2
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_38_2.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_38_2] xinetd 내 Simple Service 비활성화",
+                  "cmd": "lineinfile: disable=yes (target: echo, discard, daytime, chargen)",
+                  "result": "changed=" ~ (xinetd_changed | string)
+                } | to_json
+              }}
+          changed_when: false
+      when: xinetd_dir is directory
+
+    # =========================================================
+    # 3. systemd 서비스 중지 (echo, discard, daytime, chargen)
+    # - NTP, DNS, SMTP 등은 자동 중지하지 않음 (위험)
+    # =========================================================
+    - name: "U-38 | [U_38_3] systemd Simple Service 중지/비활성화"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - echo.socket
+        - discard.socket
+        - daytime.socket
+        - chargen.socket
+        - echo.service
+        - discard.service
+        - daytime.service
+        - chargen.service
+      register: r_systemd_loop
+      failed_when: false
+      ignore_errors: yes
+
+    - name: "U-38 | [U_38_3] systemd 조치 결과 집계"
+      ansible.builtin.set_fact:
+        systemd_changed: "{{ r_systemd_loop.results | selectattr('changed', 'equalto', true) | list | length > 0 }}"
+      changed_when: false
+
+    - name: "U-38 | [U_38_3] systemd 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_38_3
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_38_3.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_38_3] systemd Simple Service 중지",
+                  "cmd": "systemctl stop/disable (echo, discard, daytime, chargen)",
+                  "result": "changed=" ~ (systemd_changed | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # Final Basis Log (종합 결과)
+    # =========================================================
+    - name: "U-38 | Final Basis Log"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_38_final
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_38_final.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "DoS 취약 서비스 조치 결과: "
+                    ~ (((r_inetd.changed | default(false)) | bool) | ternary("inetd 주석 완료, ", "inetd 양호/미사용, "))
+                    ~ ((xinetd_changed | bool) | ternary("xinetd 비활성 완료, ", "xinetd 양호/미사용, "))
+                    ~ ((systemd_changed | bool) | ternary("Simple 서비스 중지됨. ", "Simple 서비스 미구동. "))
+                    ~ "(※ NTP/DNS/SMTP/SNMP는 장애 예방을 위해 자동 조치 제외)"
+                  ),
+                  "status": (
+                      ((r_inetd.changed or xinetd_changed or systemd_changed) | bool)
+                      | ternary("취약(조치됨)", "양호")
+                  )
+                } | to_json
+              }}
+          changed_when: false

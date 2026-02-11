@@ -1,0 +1,219 @@
+---
+- name: "U-37 | Remediate Crontab/At File Permissions"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    FLAG_ID: "U-37"
+    
+    # 1. 실행 파일 목록
+    target_bins:
+      - "/usr/bin/crontab"
+      - "/usr/bin/at"
+
+    # 2. 설정 파일 목록 (존재하는 것만 처리)
+    target_configs:
+      - "/etc/crontab"
+      - "/etc/cron.allow"
+      - "/etc/cron.deny"
+      - "/etc/at.allow"
+      - "/etc/at.deny"
+
+    # 3. 디렉터리 목록 (내부 파일 권한 조치용)
+    target_dirs:
+      - "/etc/cron.d"
+      - "/etc/cron.daily"
+      - "/etc/cron.hourly"
+      - "/etc/cron.monthly"
+      - "/etc/cron.weekly"
+      
+    # OS별 Cron Spool 경로 구분
+    cron_spool_dir: "{{ '/var/spool/cron' if ansible_os_family == 'RedHat' else '/var/spool/cron/crontabs' }}"
+
+    # 로깅 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    - name: "U-37 | init defaults"
+      ansible.builtin.set_fact:
+        r_bin: {}
+        r_conf: {}
+        r_dirs: {}
+        r_spool: {}
+      changed_when: false
+
+    # =========================================================
+    # 1. 실행 파일(Binary) 조치: SUID 제거 및 750 설정
+    # =========================================================
+    - name: "U-37 | [U_37_1] 명령어(crontab, at) 권한 750 설정 (SUID 제거)"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: '0750' # 4xxx(SUID)가 제거됨
+      loop: "{{ target_bins }}"
+      register: r_bin
+      ignore_errors: yes # 파일 없을 경우 무시
+
+    - name: "U-37 | [U_37_1] 명령어 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_37_1
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_37_1.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_37_1] 명령어(crontab, at) SUID 제거 및 권한 750 설정",
+                  "cmd": "chmod 750 /usr/bin/crontab, /usr/bin/at",
+                  "result": "changed=" ~ (r_bin.changed | string)
+                } | to_json
+              }}
+          changed_when: false
+      when: r_bin is defined
+
+    # =========================================================
+    # 2. 설정 파일(Config) 조치: 소유자 root, 권한 640
+    # =========================================================
+    - name: "U-37 | [U_37_2] 설정 파일 권한 640 설정"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: '0640'
+      loop: "{{ target_configs }}"
+      register: r_conf
+      ignore_errors: yes # 파일이 없으면 넘어감 (예: cron.allow가 없을 수 있음)
+
+    - name: "U-37 | [U_37_2] 설정 파일 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_37_2
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_37_2.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_37_2] Cron/At 설정 파일 권한 640 설정",
+                  "cmd": "chmod 640 /etc/crontab, /etc/cron.*, /etc/at.*",
+                  "result": "changed=" ~ (r_conf.changed | string)
+                } | to_json
+              }}
+          changed_when: false
+      when: r_conf is defined
+
+    # =========================================================
+    # 3. 디렉터리 내부 파일 조치 (/etc/cron.d 등): 권한 640
+    # =========================================================
+    - name: "U-37 | [U_37_1] Cron 디렉터리 내 파일 권한 640 설정"
+      # 디렉터리가 존재할 때만 find 실행
+      ansible.builtin.find:
+        paths: "{{ target_dirs }}"
+        file_type: file
+      register: found_cron_files
+
+    - name: "U-37 | Apply permissions to found directory files"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: '0640'
+      loop: "{{ found_cron_files.files }}"
+      register: r_dirs
+      when: found_cron_files.matched > 0
+      loop_control:
+        label: "{{ item.path }}"
+
+    # =========================================================
+    # 4. Spool 디렉터리 조치 (/var/spool/cron 등): 권한 600
+    # * 사용자 크론 파일은 보안상 600이 더 안전 (가이드는 640 이하)
+    # =========================================================
+    - name: "U-37 | Detect Cron Spool Files"
+      ansible.builtin.find:
+        paths: "{{ cron_spool_dir }}"
+        file_type: file
+        recurse: yes
+      register: found_spool_files
+      ignore_errors: yes # 디렉터리 없을 수 있음
+
+    - name: "U-37 | [U_37_1] Spool 파일 권한 600 설정"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: root
+        mode: '0600'
+      loop: "{{ found_spool_files.files }}"
+      register: r_spool
+      when: found_spool_files.matched > 0
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: "U-37 | [U_37_1] 디렉터리/Spool 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_37_3
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_37_3.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_37_1] Cron 디렉터리 및 Spool 파일 권한 조치",
+                  "cmd": "chmod 640 (etc/cron.*) / chmod 600 (spool)",
+                  "result": "changed=" ~ (((r_dirs.changed | default(false)) or (r_spool.changed | default(false))) | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # Final Basis Log (종합 결과)
+    # =========================================================
+    - name: "U-37 | Final Basis Log"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_37_final
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_37_final.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "Crontab/At 권한 조치 결과: "
+                    ~ (((r_bin.changed | default(false)) | bool) | ternary("명령어(SUID 제거) 완료, ", "명령어 양호, "))
+                    ~ (((r_conf.changed | default(false)) | bool) | ternary("설정파일(640) 완료, ", "설정파일 양호, "))
+                    ~ (((r_dirs.changed | default(false)) or (r_spool.changed | default(false))) | ternary("디렉터리/Spool 완료", "디렉터리 양호"))
+                  ),
+                  "status": (
+                      ((r_bin.changed or r_conf.changed or r_dirs.changed or r_spool.changed) | bool)
+                      | ternary("취약(조치됨)", "양호")
+                  )
+                } | to_json
+              }}
+          changed_when: false

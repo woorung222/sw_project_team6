@@ -1,0 +1,210 @@
+---
+- name: "U-42 | Disable Unnecessary RPC Services (Logs-Only JSONL)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-42"
+    
+    # 주요기반시설 가이드 및 스크립트 기반 RPC 서비스 목록
+    rpc_services:
+      - rpcbind
+      - rpc.cmsd
+      - rpc.ttdbserverd
+      - sadmind
+      - rusersd
+      - walld
+      - sprayd
+      - rstatd
+      - rpc.nisd
+      - rexd
+      - rpc.pcnfsd
+      - rpc.statd
+      - rpc.ypupdated
+      - rpc.rquotad
+      - kcms_server
+      - cachefsd
+
+    inetd_conf: "/etc/inetd.conf"
+    xinetd_dir: "/etc/xinetd.d"
+
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-42 | init defaults"
+      ansible.builtin.set_fact:
+        r_inetd: {}
+        r_inetd_restart: {}
+        r_xinetd: {}
+        r_xinetd_restart: {}
+        r_systemd: []
+      changed_when: false
+
+    # =========================================================
+    # 조치 1) inetd: /etc/inetd.conf 내 RPC 서비스 주석 처리
+    # =========================================================
+    - name: "U-42 | [U_42_1] inetd.conf 파일 확인"
+      stat:
+        path: "{{ inetd_conf }}"
+      register: st_inetd
+
+    - name: "U-42 | [U_42_1] inetd RPC 서비스 주석 처리"
+      ansible.builtin.replace:
+        path: "{{ inetd_conf }}"
+        # 주석(#)이 없으면서 RPC 서비스명이 포함된 라인을 찾음
+        regexp: '^(?![[:space:]]*#).*(?:{{ rpc_services | join("|") }}).*'
+        replace: '# \g<0>'
+        backup: yes
+      register: r_inetd
+      when: st_inetd.stat.exists
+
+    - name: "U-42 | [U_42_1] inetd 재시작"
+      ansible.builtin.systemd:
+        name: "inetd"
+        state: restarted
+      when: st_inetd.stat.exists and r_inetd.changed
+      register: r_inetd_restart
+      failed_when: false
+
+    # inetd 조치 결과 로그
+    - name: "U-42 | [U_42_1] inetd 조치 결과 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_421
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_421.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": "[U_42_1] inetd 내 RPC 서비스 비활성화",
+                  "basis": (
+                    st_inetd.stat.exists | ternary(
+                      "[U_42_1] inetd.conf 내 RPC 서비스 " ~ (r_inetd.changed | ternary("주석 처리 완료", "발견되지 않음/이미 조치됨")) ~ " / 서비스 재시작 " ~ (r_inetd_restart.changed | default(false) | ternary("성공", "불필요")),
+                      "[U_42_1] inetd.conf 파일이 없어 조치 생략"
+                    )
+                  ),
+                  "status": (r_inetd.changed | default(false) | ternary("취약", "양호"))
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # 조치 2) xinetd: /etc/xinetd.d/ 내 RPC 서비스 disable = yes
+    # =========================================================
+    - name: "U-42 | [U_42_2] xinetd 디렉토리 확인"
+      stat:
+        path: "{{ xinetd_dir }}"
+      register: st_xinetd
+
+    - name: "U-42 | [U_42_2] xinetd 내 RPC 서비스 검색 및 비활성화"
+      # xinetd.d 폴더 내에서 RPC 목록에 해당하는 파일이 있으면 disable = yes 로 변경
+      # (복잡성을 줄이기 위해 shell 모듈과 sed 사용, Ansible file module로는 동적 파일 매칭이 어려움)
+      shell: |
+        changed=0
+        for service in {{ rpc_services | join(" ") }}; do
+          if [ -f "{{ xinetd_dir }}/$service" ]; then
+            # disable = no 가 있는지 확인
+            if grep -Eq "^\s*disable\s*=\s*no" "{{ xinetd_dir }}/$service"; then
+              sed -i 's/^\(\s*disable\s*=\s*\)no/\1yes/g' "{{ xinetd_dir }}/$service"
+              changed=1
+            fi
+          fi
+        done
+        echo $changed
+      register: r_xinetd
+      when: st_xinetd.stat.exists and st_xinetd.stat.isdir
+      changed_when: "r_xinetd.stdout == '1'"
+
+    - name: "U-42 | [U_42_2] xinetd 재시작"
+      ansible.builtin.systemd:
+        name: "xinetd"
+        state: restarted
+      when: st_xinetd.stat.exists and (r_xinetd.changed | default(false))
+      register: r_xinetd_restart
+      failed_when: false
+
+    # xinetd 조치 결과 로그
+    - name: "U-42 | [U_42_2] xinetd 조치 결과 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_422
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_422.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": "[U_42_2] xinetd 내 RPC 서비스 비활성화",
+                  "basis": (
+                    st_xinetd.stat.exists | ternary(
+                      "[U_42_2] xinetd.d 내 RPC 서비스 " ~ (r_xinetd.changed | ternary("disable=yes 설정 완료", "활성화된 서비스 없음")) ~ " / 서비스 재시작 " ~ (r_xinetd_restart.changed | default(false) | ternary("성공", "불필요")),
+                      "[U_42_2] xinetd 디렉토리가 없어 조치 생략"
+                    )
+                  ),
+                  "status": (r_xinetd.changed | default(false) | ternary("취약", "양호"))
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # 조치 3) systemd: RPC 서비스 stop & disable
+    # =========================================================
+    - name: "U-42 | [U_42_3] systemd 서비스 상태 확인 및 조치"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop: "{{ rpc_services }}"
+      register: r_systemd_results
+      ignore_errors: yes  # 존재하지 않는 서비스는 에러 무시
+      
+    # Systemd 조치 결과 집계 및 로그
+    - name: "U-42 | [U_42_3] systemd 조치 결과 집계 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_423
+          changed_when: false
+
+        - name: "결과 집계 파싱"
+          set_fact:
+            # 변경된(조치된) 서비스 목록 추출
+            changed_services: "{{ r_systemd_results.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list }}"
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_423.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": "[U_42_3] Systemd RPC 서비스 중지 및 비활성화",
+                  "basis": (
+                    (changed_services | length > 0) | ternary(
+                      "[U_42_3] 조치된 서비스: " ~ (changed_services | join(", ")),
+                      "[U_42_3] 활성화된 불필요 RPC 서비스가 발견되지 않음(양호)"
+                    )
+                  ),
+                  "status": ((changed_services | length > 0) | ternary("취약", "양호"))
+                } | to_json
+              }}
+          changed_when: false

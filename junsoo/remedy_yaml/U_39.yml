@@ -1,0 +1,177 @@
+---
+- name: "U-39 | Disable Unnecessary NFS Services"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    FLAG_ID: "U-39"
+    
+    # OS별 패키지 및 서비스 명
+    nfs_pkgs_rocky:
+      - nfs-utils
+      - rpcbind
+    nfs_pkgs_ubuntu:
+      - nfs-kernel-server
+      - rpcbind
+
+    nfs_services_rocky:
+      - nfs-server
+      - rpcbind
+    nfs_services_ubuntu:
+      - nfs-kernel-server
+      - rpcbind
+
+    exports_file: "/etc/exports"
+
+    # 로깅 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    - name: "U-39 | init defaults"
+      ansible.builtin.set_fact:
+        r_svc: {}
+        r_pkg: {}
+        r_conf: {}
+        svc_list: []
+        pkg_list: []
+      changed_when: false
+
+    # =========================================================
+    # 0. 변수 설정 (OS 구분)
+    # =========================================================
+    - name: "U-39 | Set OS specific variables"
+      ansible.builtin.set_fact:
+        svc_list: "{{ nfs_services_rocky if ansible_os_family == 'RedHat' else nfs_services_ubuntu }}"
+        pkg_list: "{{ nfs_pkgs_rocky if ansible_os_family == 'RedHat' else nfs_pkgs_ubuntu }}"
+      changed_when: false
+
+    # =========================================================
+    # 1. 서비스 중지 및 비활성화
+    # =========================================================
+    - name: "U-39 | [U_39_1] NFS 관련 서비스 중지 및 비활성화"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ svc_list }}"
+      register: r_svc
+      failed_when: false
+      ignore_errors: yes
+
+    - name: "U-39 | [U_39_1] 서비스 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_39_1
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_39_1.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_39_1] NFS 서비스 중지 및 비활성화",
+                  "cmd": "systemctl stop/disable " ~ (svc_list | join(', ')),
+                  "result": "changed=" ~ (r_svc.results | selectattr('changed', 'equalto', true) | list | length > 0)
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # 2. 공유 설정 파일 초기화 (/etc/exports)
+    # =========================================================
+    - name: "U-39 | [U_39_3] /etc/exports 파일 백업 및 초기화"
+      ansible.builtin.copy:
+        src: "{{ exports_file }}"
+        dest: "{{ exports_file }}.bak_{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: yes
+      failed_when: false
+    
+    - name: "U-39 | [U_39_3] Clear /etc/exports"
+      ansible.builtin.copy:
+        dest: "{{ exports_file }}"
+        content: "" # 빈 파일로 만듦
+      register: r_conf
+      when: exports_file is file
+
+    # =========================================================
+    # 3. 패키지 삭제 (진단 스크립트 통과 목적)
+    # =========================================================
+    - name: "U-39 | [U_39_3] NFS 관련 패키지 삭제 (Rocky)"
+      ansible.builtin.dnf:
+        name: "{{ pkg_list }}"
+        state: absent
+      register: r_pkg_rocky
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: "U-39 | [U_39_3] NFS 관련 패키지 삭제 (Ubuntu)"
+      ansible.builtin.apt:
+        name: "{{ pkg_list }}"
+        state: absent
+        purge: yes
+      register: r_pkg_ubuntu
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: "U-39 | [U_39_3] 패키지 삭제 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_39_3
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_39_3.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_39_3] NFS 관련 패키지 삭제",
+                  "cmd": "dnf/apt remove " ~ (pkg_list | join(', ')),
+                  "result": "changed=" ~ (((r_pkg_rocky.changed | default(false)) or (r_pkg_ubuntu.changed | default(false))) | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # Final Basis Log (종합 결과)
+    # =========================================================
+    - name: "U-39 | Final Basis Log"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_39_final
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_39_final.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "NFS 서비스 조치 결과: "
+                    ~ (((r_svc.results | selectattr('changed', 'equalto', true) | list | length > 0) | bool) | ternary("서비스 중지됨, ", "서비스 미구동, "))
+                    ~ (((r_conf.changed | default(false)) | bool) | ternary("exports 초기화됨, ", "exports 양호, "))
+                    ~ (((r_pkg_rocky.changed | default(false)) or (r_pkg_ubuntu.changed | default(false))) | ternary("패키지 삭제됨", "패키지 미설치"))
+                  ),
+                  "status": (
+                      ((r_svc.results | selectattr('changed', 'equalto', true) | list | length > 0) or r_conf.changed or r_pkg_rocky.changed or r_pkg_ubuntu.changed)
+                      | ternary("취약(조치됨)", "양호")
+                  )
+                } | to_json
+              }}
+          changed_when: false

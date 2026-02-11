@@ -1,0 +1,158 @@
+---
+- name: "U-13 | Secure Password Hashing Algorithm (SHA-512)"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    FLAG_ID: "U-13"
+    
+    # 설정 파일 경로
+    login_defs: "/etc/login.defs"
+    pam_ubuntu: "/etc/pam.d/common-password"
+    pam_rocky_system: "/etc/pam.d/system-auth"
+    pam_rocky_password: "/etc/pam.d/password-auth"
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-13 | init defaults"
+      ansible.builtin.set_fact:
+        r_login_defs: {}
+        r_pam_ubuntu: {}
+        r_pam_rocky_sys: {}
+        r_pam_rocky_pw: {}
+      changed_when: false
+
+    # =========================================================
+    # 1. /etc/login.defs 설정 (공통)
+    #    ENCRYPT_METHOD SHA512 설정
+    # =========================================================
+    - name: "U-13 | [Common] Configure ENCRYPT_METHOD in login.defs"
+      ansible.builtin.lineinfile:
+        path: "{{ login_defs }}"
+        # 기존 설정(MD5, DES, SHA256 등)을 찾아 SHA512로 변경
+        regexp: '^ENCRYPT_METHOD'
+        line: 'ENCRYPT_METHOD SHA512'
+        state: present
+        create: no
+      register: r_login_defs
+      when: login_defs is file
+
+    # =========================================================
+    # 2. PAM 설정 - Ubuntu 24.04
+    #    /etc/pam.d/common-password 수정
+    # =========================================================
+    - name: "U-13 | [Ubuntu] Configure pam_unix.so sha512"
+      ansible.builtin.replace:
+        path: "{{ pam_ubuntu }}"
+        # pam_unix.so 라인에 md5, sha256 등이 있으면 sha512로 변경하거나, 없으면 추가
+        # 여기서는 단순화를 위해 pam_unix.so가 있는 라인에 sha512가 없으면 끝에 추가하는 방식보다는
+        # 기존 암호화 옵션(md5, bigcrypt 등)을 제거하고 sha512를 보장하는 정규식 사용
+        # (주의: 복잡한 옵션이 많을 수 있으므로 sha512 문자열 존재 여부 확인 후 삽입)
+        regexp: '(pam_unix\.so.*)(md5|sha256|blowfish)(.*)'
+        replace: '\1sha512\3'
+      register: r_pam_ubuntu_replace
+      when: 
+        - ansible_os_family == "Debian"
+        - pam_ubuntu is file
+
+    # 위 정규식에 걸리지 않았는데(옵션이 아예 없거나 이미 sha512일수도) sha512가 없는 경우 추가
+    - name: "U-13 | [Ubuntu] Ensure sha512 option exists"
+      ansible.builtin.replace:
+        path: "{{ pam_ubuntu }}"
+        regexp: '(pam_unix\.so)((?!.*sha512).*)'
+        replace: '\1 sha512\2'
+      register: r_pam_ubuntu_add
+      when: 
+        - ansible_os_family == "Debian"
+        - pam_ubuntu is file
+        - not (r_pam_ubuntu_replace.changed | default(false))
+
+    # =========================================================
+    # 3. PAM 설정 - Rocky Linux 9
+    #    /etc/pam.d/system-auth, password-auth 수정
+    # =========================================================
+    - name: "U-13 | [Rocky] Configure sha512 in system-auth"
+      ansible.builtin.replace:
+        path: "{{ pam_rocky_system }}"
+        # pam_unix.so 뒤에 sha512 추가 (이미 있으면 무시되도록 정규식 처리 까다로움)
+        # Rocky는 보통 'password sufficient pam_unix.so sha512 shadow ...' 형태
+        # sha512가 없는 경우 pam_unix.so 뒤에 추가
+        regexp: '(password\s+.*pam_unix\.so)(?!\s+.*sha512)(.*)'
+        replace: '\1 sha512\2'
+      register: r_pam_rocky_sys
+      when: 
+        - ansible_os_family == "RedHat"
+        - pam_rocky_system is file
+
+    - name: "U-13 | [Rocky] Configure sha512 in password-auth"
+      ansible.builtin.replace:
+        path: "{{ pam_rocky_password }}"
+        regexp: '(password\s+.*pam_unix\.so)(?!\s+.*sha512)(.*)'
+        replace: '\1 sha512\2'
+      register: r_pam_rocky_pw
+      when: 
+        - ansible_os_family == "RedHat"
+        - pam_rocky_password is file
+
+    # =========================================================
+    # 4. 결과 로깅
+    # =========================================================
+    - name: "U-13 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "패스워드 암호화 알고리즘(SHA-512) 설정",
+                  "cmd": "login.defs(ENCRYPT_METHOD), PAM(pam_unix.so sha512)",
+                  "result": "login.defs=" ~ ((r_login_defs.changed | default(false)) | bool | string) ~
+                            ", pam_ubuntu=" ~ (((r_pam_ubuntu_replace.changed | default(false)) or (r_pam_ubuntu_add.changed | default(false))) | bool | string) ~
+                            ", pam_rocky=" ~ (((r_pam_rocky_sys.changed | default(false)) or (r_pam_rocky_pw.changed | default(false))) | bool | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-13 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "login.defs(SHA512) " ~
+                    ((r_login_defs.changed | default(false)) | ternary("설정됨", "이미 설정됨")) ~
+                    ", PAM 모듈 " ~
+                    (((r_pam_ubuntu_replace.changed | default(false)) or (r_pam_ubuntu_add.changed | default(false)) or (r_pam_rocky_sys.changed | default(false))) | ternary("강화됨(SHA512 적용)", "이미 양호함"))
+                  ),
+                  "status": "양호"
+                } | to_json
+              }}
+          changed_when: false

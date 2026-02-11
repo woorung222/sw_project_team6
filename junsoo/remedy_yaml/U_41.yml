@@ -1,0 +1,85 @@
+---
+- name: "U-41 | Disable Automountd Service (autofs)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-41"
+
+    # 조치 대상 서비스명
+    target_service: "autofs"
+
+    # 로깅 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    - name: "U-41 | init defaults"
+      ansible.builtin.set_fact:
+        r_autofs: {}
+      changed_when: false
+
+    # =========================================================
+    # 1. Autofs 서비스 중지 및 비활성화
+    # =========================================================
+    - name: "U-41 | [U_41_1] autofs 서비스 중지 및 비활성화"
+      ansible.builtin.systemd:
+        name: "{{ target_service }}"
+        state: stopped
+        enabled: false
+      register: r_autofs
+      failed_when: false
+      ignore_errors: yes
+
+    - name: "U-41 | [U_41_1] 서비스 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_41_1
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_41_1.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_41_1] automountd(autofs) 서비스 중지 및 비활성화",
+                  "cmd": "systemctl stop autofs && systemctl disable autofs",
+                  "result": "changed=" ~ (((r_autofs.changed | default(false)) | bool) | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # Final Basis Log (종합 결과)
+    # =========================================================
+    - name: "U-41 | Final Basis Log"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_41_final
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_41_final.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "autofs 서비스 조치 결과: "
+                    ~ (((r_autofs.changed | default(false)) | bool) | ternary("중지/비활성화 완료", "이미 중지됨/미설치(변경 없음)"))
+                  ),
+                  "status": (((r_autofs.changed | default(false)) | bool) | ternary("취약(조치됨)", "양호"))
+                } | to_json
+              }}
+          changed_when: false

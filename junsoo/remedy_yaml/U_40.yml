@@ -1,0 +1,155 @@
+---
+- name: "U-40 | Remediate NFS Access Control"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    FLAG_ID: "U-40"
+    exports_file: "/etc/exports"
+    
+    # 취약하다고 판단할 키워드 (와일드카드, 취약 옵션)
+    # Ubuntu 진단 스크립트 기준 포함 (*, no_root_squash, insecure)
+    unsafe_patterns:
+      - '*'
+      - 'no_root_squash'
+      - 'insecure'
+
+    # 로깅 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    - name: "U-40 | init defaults"
+      ansible.builtin.set_fact:
+        r_perm: {}
+        r_content: {}
+        file_exists: false
+      changed_when: false
+
+    # =========================================================
+    # 0. 파일 존재 여부 확인
+    # =========================================================
+    - name: "U-40 | Check if /etc/exports exists"
+      ansible.builtin.stat:
+        path: "{{ exports_file }}"
+      register: st_exports
+
+    - name: "U-40 | Set file existence fact"
+      ansible.builtin.set_fact:
+        file_exists: "{{ st_exports.stat.exists }}"
+      changed_when: false
+
+    # =========================================================
+    # 1. 파일 권한 조치 (U_40_1) - 소유자 root, 권한 644
+    # =========================================================
+    - name: "U-40 | [U_40_1] /etc/exports 권한 644 및 소유자 root 설정"
+      ansible.builtin.file:
+        path: "{{ exports_file }}"
+        owner: root
+        group: root
+        mode: '0644'
+      register: r_perm
+      when: file_exists
+
+    - name: "U-40 | [U_40_1] 권한 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_40_1
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_40_1.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_40_1] /etc/exports 권한 및 소유자 설정",
+                  "cmd": "chmod 644 /etc/exports && chown root /etc/exports",
+                  "result": "changed=" ~ (r_perm.changed | string)
+                } | to_json
+              }}
+          changed_when: false
+      when: file_exists
+
+    # =========================================================
+    # 2. 내용 조치 (U_40_2) - '*' 포함 라인 주석 처리
+    # =========================================================
+    - name: "U-40 | [U_40_2] 불특정 다수(*) 또는 취약 옵션 설정 주석 처리"
+      # 정규식 설명: 주석(#)으로 시작하지 않는 행 중, * 또는 no_root_squash 또는 insecure가 포함된 경우
+      # 해당 라인 전체를 주석(# ) 처리함
+      ansible.builtin.replace:
+        path: "{{ exports_file }}"
+        regexp: '^(?![[:space:]]*#)(.*(?:{{ unsafe_patterns | join("|") | replace("*", "\\*") }}).*)$'
+        replace: '# [U-40 Remediation] \1'
+      register: r_content
+      when: file_exists
+
+    - name: "U-40 | [U_40_2] 내용 조치 로그"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_40_2
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_40_2.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_40_2] /etc/exports 내 취약 설정(*, insecure) 주석 처리",
+                  "cmd": "replace: disable lines with wildcards/insecure options",
+                  "result": "changed=" ~ (r_content.changed | string)
+                } | to_json
+              }}
+          changed_when: false
+      when: file_exists
+
+    # =========================================================
+    # 3. 설정 적용 (exportfs)
+    # =========================================================
+    - name: "U-40 | Apply NFS changes"
+      ansible.builtin.command: "exportfs -ra"
+      when: file_exists and r_content.changed
+      ignore_errors: yes
+
+    # =========================================================
+    # Final Basis Log (종합 결과)
+    # =========================================================
+    - name: "U-40 | Final Basis Log"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_40_final
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_40_final.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "NFS 접근 통제 조치 결과: "
+                    ~ (file_exists | ternary("", "파일 미존재(양호)"))
+                    ~ (((r_perm.changed | default(false)) | bool) | ternary("권한(644) 수정됨, ", "권한 양호, "))
+                    ~ (((r_content.changed | default(false)) | bool) | ternary("취약 설정(Wildcard 등) 주석 처리됨", "설정 내용 양호"))
+                  ),
+                  "status": (
+                      ((r_perm.changed or r_content.changed) | bool)
+                      | ternary("취약(조치됨)", "양호")
+                  )
+                } | to_json
+              }}
+          changed_when: false

@@ -1,0 +1,119 @@
+---
+- name: "U-05 | Remove/Modify Non-Root UID 0 Accounts"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-05"
+    passwd_file: "/etc/passwd"
+    # 변경할 새로운 UID 시작 번호 (기존 계정과 겹치지 않게 높게 설정)
+    NEW_UID_START: 5000
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-05 | init defaults"
+      ansible.builtin.set_fact:
+        target_accounts: []
+        r_usermod: []
+      changed_when: false
+
+    # =========================================================
+    # 1. 진단: Root 이외의 UID 0 계정 식별
+    # =========================================================
+    - name: "U-05 | Identify non-root accounts with UID 0"
+      ansible.builtin.shell: |
+        awk -F: '$3 == 0 && $1 != "root" {print $1}' {{ passwd_file }}
+      register: r_check_uid0
+      changed_when: false
+      failed_when: false
+
+    - name: "U-05 | Set target accounts"
+      ansible.builtin.set_fact:
+        target_accounts: "{{ r_check_uid0.stdout_lines | default([]) }}"
+      changed_when: false
+
+    # =========================================================
+    # 2. 조치: 식별된 계정의 UID 변경 (Root 권한 박탈)
+    #    - usermod -u [NEW_UID] [USER]
+    # =========================================================
+    - name: "U-05 | Modify UID for detected accounts"
+      ansible.builtin.command:
+        cmd: "usermod -u {{ NEW_UID_START + index }} {{ item }}"
+      loop: "{{ target_accounts }}"
+      loop_control:
+        index_var: index
+      register: r_usermod
+      when: target_accounts | length > 0
+      # 계정 변경은 위험할 수 있으므로 실패해도 계속 진행하되 에러 로깅
+      ignore_errors: yes 
+
+    # =========================================================
+    # 3. 결과 로깅
+    # =========================================================
+    - name: "U-05 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "Root 이외 UID 0 계정 조치 (UID 변경)",
+                  "cmd": "usermod -u [NEW_UID] [ACCOUNT]",
+                  "result": "targets=" ~ (target_accounts | join(", ") if (target_accounts | length > 0) else "None") ~
+                            ", modified_count=" ~ (r_usermod.results | default([]) | selectattr('changed', 'equalto', true) | list | length | string)
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-05 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+        
+        # 실제 변경 여부 확인
+        - name: "Check success count"
+          set_fact:
+            success_count: "{{ r_usermod.results | default([]) | selectattr('changed', 'equalto', true) | list | length }}"
+            total_count: "{{ target_accounts | length }}"
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    (total_count | int == 0) | ternary(
+                      "UID 0 중복 계정 없음 (양호)",
+                      "발견된 계정(" ~ (target_accounts | join(",")) ~ ") 중 " ~ (success_count | string) ~ "개 UID 변경 완료"
+                    )
+                  ),
+                  "status": (
+                    (total_count | int == 0) | ternary("양호", 
+                      (success_count | int == total_count | int) | ternary("취약(조치완료)", "취약(조치실패/일부성공)"))
+                  )
+                } | to_json
+              }}
+          changed_when: false

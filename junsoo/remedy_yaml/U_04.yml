@@ -1,0 +1,103 @@
+---
+- name: "U-04 | Password File Protection (Shadow Suite)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-04"
+    passwd_file: "/etc/passwd"
+    shadow_file: "/etc/shadow"
+
+    # 로그 관련 변수
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 초기화
+    # ---------------------------------------------------------
+    - name: "U-04 | init defaults"
+      ansible.builtin.set_fact:
+        r_pwconv: {}
+        vuln_accounts: []
+      changed_when: false
+
+    # =========================================================
+    # 1. 진단: Shadow 패스워드 미사용 계정 식별
+    #    /etc/passwd의 2번째 필드가 'x'가 아닌 계정 찾기
+    # =========================================================
+    - name: "U-04 | Check for non-shadowed passwords in /etc/passwd"
+      ansible.builtin.shell: |
+        awk -F: '$2 != "x" {print $1}' {{ passwd_file }}
+      register: r_check_passwd
+      changed_when: false
+      failed_when: false
+
+    - name: "U-04 | Set vulnerability status"
+      ansible.builtin.set_fact:
+        vuln_accounts: "{{ r_check_passwd.stdout_lines | default([]) }}"
+      changed_when: false
+
+    # =========================================================
+    # 2. 조치: pwconv 실행 (취약 계정이 발견된 경우에만)
+    # =========================================================
+    - name: "U-04 | Apply Shadow Password Suite (pwconv)"
+      ansible.builtin.command:
+        cmd: "pwconv"
+      register: r_pwconv
+      when: vuln_accounts | length > 0
+
+    # =========================================================
+    # 3. 결과 로깅
+    # =========================================================
+    - name: "U-04 | 조치 내용 상세 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_step
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_step.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "Shadow 패스워드 시스템 전환 (pwconv)",
+                  "cmd": "pwconv",
+                  "result": "attempted=" ~ ((vuln_accounts | length > 0) | bool | string) ~
+                            ", changed=" ~ ((r_pwconv.changed | default(false)) | bool | string) ~
+                            ", target_accounts=" ~ (vuln_accounts | join(", ") if (vuln_accounts | length > 0) else "None")
+                } | to_json
+              }}
+          changed_when: false
+
+    - name: "U-04 | 최종 결과 근거 LOG"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_basis
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_basis.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "Shadow 패스워드 정책 " ~
+                    (((vuln_accounts | length > 0) and (r_pwconv.changed | default(false))) | ternary("적용됨(pwconv 수행)", "이미 적용됨(조치 불필요)"))
+                  ),
+                  "status": (((vuln_accounts | length > 0) and (r_pwconv.changed | default(false))) | ternary("취약(조치완료)", "양호"))
+                } | to_json
+              }}
+          changed_when: false
