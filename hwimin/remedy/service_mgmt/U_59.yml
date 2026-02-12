@@ -1,0 +1,437 @@
+    ---
+    - name: "U-59 | Remediate Secure SNMP Version (v3+) (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-59"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+        # ===== 타겟 =====
+        SNMPD_SERVICE: "snmpd"
+        SNMPD_CONF: "/etc/snmp/snmpd.conf"
+    
+        # ===== 패턴(주석 제외 판정은 shell에서 처리) =====
+        V3_MARKER_REGEX: "createUser|rouser|authPriv"
+        V1V2_MARKER_REGEX: "rocommunity|rwcommunity|com2sec"
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-59 | init defaults"
+          ansible.builtin.set_fact:
+            snmpd_unit_exists: "NO"
+            snmpd_is_active: "NO"
+            snmpd_proc_exists: "NO"
+    
+            st_snmpd_conf: {}
+            v3_exists: "NO"
+            v1v2_exists: "NO"
+    
+            r_comment_v1v2: {}
+            r_snmpd_restart: {}
+          changed_when: false
+    
+        # =========================================================
+        # U_59_1 : SNMP v3 사용 유도 (v1/v2c 차단)
+        # - 원칙(보수적/장애0):
+        #   * snmpd 미실행: 양호(조치 불필요)
+        #   * snmpd 실행 + v3 미설정: v3 사용자/권한/암호 필요 → 자동조치 금지(info)
+        #   * snmpd 실행 + v3 설정 + v1/v2c 남음: v1/v2c 라인 주석처리(자동) + 재시작 시도
+        # =========================================================
+    
+        # ----- 서비스/프로세스 상태 -----
+        - name: "U-59 | [U_59_1] detect snmpd.service unit"
+          ansible.builtin.shell: |
+            systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "{{ SNMPD_SERVICE }}.service" && echo "YES" || echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_unit
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-59 | set snmpd_unit_exists"
+          ansible.builtin.set_fact:
+            snmpd_unit_exists: "{{ (r_unit.stdout | default('NO')) }}"
+          changed_when: false
+    
+        - name: "U-59 | [U_59_1] check snmpd is-active (when unit exists)"
+          ansible.builtin.shell: |
+            systemctl is-active "{{ SNMPD_SERVICE }}" >/dev/null 2>&1 && echo "YES" || echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_active
+          changed_when: false
+          failed_when: false
+          when: snmpd_unit_exists == "YES"
+    
+        - name: "U-59 | set snmpd_is_active"
+          ansible.builtin.set_fact:
+            snmpd_is_active: "{{ (r_active.stdout | default('NO')) }}"
+          changed_when: false
+          when: snmpd_unit_exists == "YES"
+    
+        - name: "U-59 | [U_59_1] check snmpd process exists (fallback)"
+          ansible.builtin.shell: |
+            ps -ef 2>/dev/null | grep -v grep | grep -q "[s]nmpd" && echo "YES" || echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_proc
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-59 | set snmpd_proc_exists"
+          ansible.builtin.set_fact:
+            snmpd_proc_exists: "{{ (r_proc.stdout | default('NO')) }}"
+          changed_when: false
+    
+        - name: "U-59 | [U_59_1] ts (status detect)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_591_a
+          changed_when: false
+    
+        - name: "U-59 | [U_59_1] LOG step (service/process detect) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_591_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_59_1] SNMP(snmpd) 서비스/프로세스 상태 확인",
+                  "cmd": "unit existence + systemctl is-active + ps -ef",
+                  "result": "unit_exists=" ~ (snmpd_unit_exists | default("NO"))
+                            ~ ", is_active=" ~ (snmpd_is_active | default("NO"))
+                            ~ ", proc_exists=" ~ (snmpd_proc_exists | default("NO"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # ----- 설정 파일/버전 흔적 점검(주석 제외) -----
+        - name: "U-59 | [U_59_1] stat snmpd.conf"
+          ansible.builtin.stat:
+            path: "{{ SNMPD_CONF }}"
+          register: st_snmpd_conf
+          changed_when: false
+    
+        - name: "U-59 | [U_59_1] detect v3 markers (non-comment) / v1v2 markers (non-comment)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            CONF="{{ SNMPD_CONF }}"
+            if [ ! -f "$CONF" ]; then
+              echo "NO NO"; exit 0
+            fi
+    
+            # 주석 제외 라인만 대상으로 판정
+            if grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null | grep -E "{{ V3_MARKER_REGEX }}" >/dev/null 2>&1; then
+              V3="YES"
+            else
+              V3="NO"
+            fi
+    
+            if grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null | grep -E "{{ V1V2_MARKER_REGEX }}" >/dev/null 2>&1; then
+              V12="YES"
+            else
+              V12="NO"
+            fi
+    
+            echo "$V3 $V12"
+          args:
+            executable: /bin/bash
+          register: r_markers
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-59 | set marker facts"
+          ansible.builtin.set_fact:
+            v3_exists: "{{ (r_markers.stdout.split(' ') | first | default('NO')) }}"
+            v1v2_exists: "{{ (r_markers.stdout.split(' ') | last  | default('NO')) }}"
+          changed_when: false
+    
+        - name: "U-59 | [U_59_1] ts (conf markers)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_591_b
+          changed_when: false
+    
+        - name: "U-59 | [U_59_1] LOG step (conf markers) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_591_b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_59_1] SNMP 설정(v3/v1v2 흔적) 확인",
+                  "cmd": "grep(non-comment) v3(" ~ V3_MARKER_REGEX ~ ") / v1v2(" ~ V1V2_MARKER_REGEX ~ ") @ " ~ SNMPD_CONF,
+                  "result": "conf_exists=" ~ (((st_snmpd_conf.stat.exists | default(false))|bool)|string)
+                            ~ ", v3_exists=" ~ (v3_exists | default("NO"))
+                            ~ ", v1v2_exists=" ~ (v1v2_exists | default("NO"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # ----- 자동조치(보수적): v3 존재 + v1/v2 존재 시에만 v1/v2 라인 주석처리 -----
+        - name: "U-59 | [U_59_1] comment out v1/v2c directives (only when v3 exists)"
+          ansible.builtin.replace:
+            path: "{{ SNMPD_CONF }}"
+            regexp: '^(?![[:space:]]*#)([[:space:]]*(rocommunity|rwcommunity|com2sec)\b.*)$'
+            replace: '# \1'
+            backup: yes
+          register: r_comment_v1v2
+          when:
+            - snmpd_unit_exists == "YES"
+            - snmpd_is_active == "YES"
+            - st_snmpd_conf.stat.exists | default(false)
+            - (v3_exists | default("NO")) == "YES"
+            - (v1v2_exists | default("NO")) == "YES"
+    
+        - name: "U-59 | [U_59_1] restart snmpd (when config changed)"
+          ansible.builtin.systemd:
+            name: "{{ SNMPD_SERVICE }}"
+            state: restarted
+          register: r_snmpd_restart
+          failed_when: false
+          when:
+            - (r_comment_v1v2.changed | default(false)) | bool
+    
+        - name: "U-59 | [U_59_1] LOG step (remediation) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_591_c
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_591_c.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_59_1] SNMP v1/v2c 지시어 주석처리(단, v3 설정 존재 시)",
+                      "cmd": "replace: comment rocommunity/rwcommunity/com2sec @ " ~ SNMPD_CONF ~ " ; restart snmpd when changed",
+                      "result": "changed=" ~ (((r_comment_v1v2.changed|default(false))|bool)|string)
+                                ~ ", backup_file=" ~ (r_comment_v1v2.backup_file | default("<none>"))
+                                ~ ", restart_failed=" ~ (((r_snmpd_restart.failed|default(false))|bool)|string)
+                                ~ ", restart_msg=" ~ ((r_snmpd_restart.msg | default("") | string) | truncate(160, True, "..."))
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - snmpd_unit_exists == "YES"
+            - snmpd_is_active == "YES"
+            - st_snmpd_conf.stat.exists | default(false)
+            - (v3_exists | default("NO")) == "YES"
+            - (v1v2_exists | default("NO")) == "YES"
+    
+        # ----- basis: 케이스별 결론 -----
+        - name: "U-59 | [U_59_1] LOG basis (unit missing) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_591_u_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_591_u_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (
+                        (snmpd_proc_exists | default("NO")) == "YES"
+                        | ternary(
+                            "[U_59_1] snmpd.service 유닛 미존재인데 snmpd 프로세스 실행 중: 수동 기동/비표준 실행(컨테이너/스크립트/직접 실행) 가능 — SNMP 버전 정책(v3 강제) 자동조치 불가(info) — 담당자 확인 필요",
+                            "[U_59_1] snmpd.service 유닛 미존재 및 프로세스 미탐지: 패키지 미설치/서비스 미사용 또는 표준 배포 비대상 가능 — 조치 불필요(양호)"
+                          )
+                      ),
+                      "status": (
+                        (snmpd_proc_exists | default("NO")) == "YES"
+                        | ternary("info", "양호")
+                      )
+                    } | to_json
+                  }}
+              changed_when: false
+          when: snmpd_unit_exists != "YES"
+    
+        - name: "U-59 | [U_59_1] LOG basis (service not active) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_591_inactive
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_591_inactive.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_59_1] snmpd 서비스가 실행 중이 아님: SNMP 평문(v1/v2c) 사용 가능성이 낮아 조치 불필요(양호) — 필요 시 U-58 기준으로 서비스 중지/비활성화 유지",
+                      "status": "양호"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - snmpd_unit_exists == "YES"
+            - (snmpd_is_active | default("NO")) != "YES"
+    
+        - name: "U-59 | [U_59_1] LOG basis (conf missing while active → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_591_conf_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_591_conf_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_59_1] snmpd 실행 중인데 " ~ SNMPD_CONF ~ " 미존재: 설정 관리 부재/비표준 경로 사용 가능 — v3 강제 여부 판단 및 조치 타겟 특정 불가(info) — 담당자 확인 필요",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - snmpd_unit_exists == "YES"
+            - snmpd_is_active == "YES"
+            - not (st_snmpd_conf.stat.exists | default(false))
+    
+        - name: "U-59 | [U_59_1] LOG basis (v3 ok, v1v2 none → safe) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_591_safe
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_591_safe.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_59_1] snmpd 실행 중이며 v3 설정 흔적(createUser/rouser/authPriv) 존재 + v1/v2c 커뮤니티(rocommunity/rwcommunity/com2sec) 미탐지: 안전한 SNMPv3 사용 기준 충족(양호)",
+                      "status": "양호"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - snmpd_unit_exists == "YES"
+            - snmpd_is_active == "YES"
+            - st_snmpd_conf.stat.exists | default(false)
+            - (v3_exists | default("NO")) == "YES"
+            - (v1v2_exists | default("NO")) != "YES"
+    
+        - name: "U-59 | [U_59_1] LOG basis (v3 missing while active → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_591_v3na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_591_v3na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (
+                        "[U_59_1] snmpd 실행 중이나 v3 설정(createUser/rouser/authPriv) 미탐지: SNMPv3 사용자/인증/암호화(SHA/AES) 값이 필요하여 자동조치 불가(info) — 담당자가 v3 사용자 생성(net-snmp-create-v3-user) 및 접근권한(rouser/rwuser) 구성 필요"
+                        ~ "; v1/v2c 커뮤니티 존재여부=" ~ (v1v2_exists | default("NO"))
+                      ),
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - snmpd_unit_exists == "YES"
+            - snmpd_is_active == "YES"
+            - st_snmpd_conf.stat.exists | default(false)
+            - (v3_exists | default("NO")) != "YES"
+    
+        - name: "U-59 | [U_59_1] LOG basis (v3 exists & v1v2 exists → auto comment) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_591_fix
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_591_fix.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (
+                        "[U_59_1] v3 설정 존재 환경에서 v1/v2c 커뮤니티(rocommunity/rwcommunity/com2sec) 잔존을 제거(주석처리)하여 SNMPv3 사용 기준 미충족 상태를 교정 적용"
+                        ~ "; snmpd 재시작 실패여부=" ~ (((r_snmpd_restart.failed|default(false))|bool) | ternary("YES","NO"))
+                      ),
+                      "status": (((r_comment_v1v2.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - snmpd_unit_exists == "YES"
+            - snmpd_is_active == "YES"
+            - st_snmpd_conf.stat.exists | default(false)
+            - (v3_exists | default("NO")) == "YES"
+            - (v1v2_exists | default("NO")) == "YES"
+    
+        # ---------------------------------------------------------
+        # (블록 말미) summary 로그
+        # ---------------------------------------------------------
+        - name: "U-59 | [U_59_1] summary LOG(JSONL)"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_591_s
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_591_s.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_59_1] summary",
+                      "cmd": "snmpd: detect unit/active + parse conf(v3/v1v2) + optional comment v1v2 + optional restart",
+                      "result": "unit_exists=" ~ (snmpd_unit_exists | default("NO"))
+                                ~ ", is_active=" ~ (snmpd_is_active | default("NO"))
+                                ~ ", conf_exists=" ~ (((st_snmpd_conf.stat.exists | default(false))|bool)|string)
+                                ~ ", v3_exists=" ~ (v3_exists | default("NO"))
+                                ~ ", v1v2_exists=" ~ (v1v2_exists | default("NO"))
+                                ~ ", comment_changed=" ~ ((((r_comment_v1v2.changed|default(false))|bool)|string))
+                                ~ ", restart_failed=" ~ ((((r_snmpd_restart.failed|default(false))|bool)|string))
+                    } | to_json
+                  }}
+              changed_when: false

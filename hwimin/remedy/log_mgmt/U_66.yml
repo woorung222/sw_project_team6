@@ -1,0 +1,350 @@
+    ---
+    - name: "U-66 | Remediate rsyslog logging policy (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-66"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+        # ===== 대상 =====
+        RSYSLOG_MAIN_CONF: "/etc/rsyslog.conf"
+        RSYSLOG_D_DIR: "/etc/rsyslog.d"
+        # drop-in (정책 반영용)
+        RSYSLOG_DROPIN: "/etc/rsyslog.d/99-u66-policy.conf"
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-66 | init defaults"
+          ansible.builtin.set_fact:
+            # flags
+            U_66_1: 0   # rsyslog 미설치 또는 서비스 비활성
+            U_66_2: 0   # authpriv.* 미흡
+            U_66_3: 0   # *.info 미흡
+            U_66_4: 0   # cron.* 미흡
+            U_66_5: 0   # mail.* 미흡
+    
+            # detect
+            rsyslog_installed: "NO"
+            rsyslog_active: "NO"
+            rsyslog_main_exists: false
+            rsyslog_d_exists: false
+    
+            has_authpriv: "NO"
+            has_info: "NO"
+            has_cron: "NO"
+            has_mail: "NO"
+    
+            # remediation registers
+            r_rsyslog_enable: {}
+            r_u66_conf: {}
+            r_rsyslog_restart: {}
+    
+            # safe strings for logs
+            u66_step_cmd_1: ""
+            u66_step_res_1: ""
+            u66_step_cmd_2: ""
+            u66_step_res_2: ""
+            u66_step_cmd_3: ""
+            u66_step_res_3: ""
+            u66_basis_msg: ""
+            u66_status_val: "info"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # rsyslog 설치/서비스 상태 감지 (U-66.sh 의미 동일) :contentReference[oaicite:1]{index=1}
+        # ---------------------------------------------------------
+        - name: "U-66 | detect rsyslog installed (rsyslogd in PATH)"
+          ansible.builtin.shell: |
+            command -v rsyslogd >/dev/null 2>&1 && echo "YES" || echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_inst
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-66 | detect rsyslog active"
+          ansible.builtin.shell: |
+            systemctl is-active --quiet rsyslog && echo "YES" || echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_act
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-66 | stat rsyslog configs"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ RSYSLOG_MAIN_CONF }}"
+            - "{{ RSYSLOG_D_DIR }}"
+          register: st_cfg
+          changed_when: false
+    
+        - name: "U-66 | set detect facts"
+          ansible.builtin.set_fact:
+            rsyslog_installed: "{{ r_inst.stdout | default('NO') }}"
+            rsyslog_active: "{{ r_act.stdout | default('NO') }}"
+            rsyslog_main_exists: >-
+              {{
+                (st_cfg.results | selectattr('item','equalto',RSYSLOG_MAIN_CONF) | map(attribute='stat.exists') | list | first) | default(false)
+              }}
+            rsyslog_d_exists: >-
+              {{
+                (st_cfg.results | selectattr('item','equalto',RSYSLOG_D_DIR) | map(attribute='stat.exists') | list | first) | default(false)
+              }}
+          changed_when: false
+    
+        - name: "U-66 | compute U_66_1"
+          ansible.builtin.set_fact:
+            U_66_1: "{{ ((rsyslog_installed != 'YES') or (rsyslog_active != 'YES')) | ternary(1,0) }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # LOG step (서비스 상태)
+        # ---------------------------------------------------------
+        - name: "U-66 | ts (service check)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_661_a
+          changed_when: false
+    
+        - name: "U-66 | build step1 cmd/result safely"
+          ansible.builtin.set_fact:
+            u66_step_cmd_1: "command -v rsyslogd ; systemctl is-active rsyslog ; stat {{ RSYSLOG_MAIN_CONF }} / {{ RSYSLOG_D_DIR }}"
+            u66_step_res_1: >-
+              installed={{ rsyslog_installed }}, active={{ rsyslog_active }},
+              main_conf_exists={{ rsyslog_main_exists }}, rsyslog_d_exists={{ rsyslog_d_exists }},
+              U_66_1={{ U_66_1 }}
+          changed_when: false
+    
+        - name: "U-66 | LOG step JSONL (service status)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_661_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_66_1] rsyslog 설치/서비스 활성 여부",
+                  "cmd": (u66_step_cmd_1 | default("")),
+                  "result": (u66_step_res_1 | default(""))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # 설정 패턴 점검(authpriv.* / *.info / cron.* / mail.*) (U-66.sh 의미 동일) :contentReference[oaicite:2]{index=2}
+        # - rsyslog 미설치면 점검 불가 → sh와 동일하게 나머지 flag는 1로 세팅
+        # ---------------------------------------------------------
+        - name: "U-66 | check config patterns (grep -r over conf + dir)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            CONF_MAIN="{{ RSYSLOG_MAIN_CONF }}"
+            CONF_DIR="{{ RSYSLOG_D_DIR }}"
+            TARGETS=""
+            [ -f "$CONF_MAIN" ] && TARGETS="$TARGETS $CONF_MAIN"
+            [ -d "$CONF_DIR" ] && TARGETS="$TARGETS $CONF_DIR"
+    
+            # default NO
+            AUTHPRIV="NO"
+            INFO="NO"
+            CRON="NO"
+            MAIL="NO"
+    
+            if [ -n "$TARGETS" ]; then
+              grep -rE "authpriv\.\*" $TARGETS 2>/dev/null | grep -vE "^[[:space:]]*#" >/dev/null 2>&1 && AUTHPRIV="YES" || true
+              grep -rE "\*\.info"      $TARGETS 2>/dev/null | grep -vE "^[[:space:]]*#" >/dev/null 2>&1 && INFO="YES"     || true
+              grep -rE "cron\.\*"      $TARGETS 2>/dev/null | grep -vE "^[[:space:]]*#" >/dev/null 2>&1 && CRON="YES"     || true
+              grep -rE "mail\.\*"      $TARGETS 2>/dev/null | grep -vE "^[[:space:]]*#" >/dev/null 2>&1 && MAIL="YES"     || true
+            fi
+    
+            echo "AUTHPRIV=${AUTHPRIV}"
+            echo "INFO=${INFO}"
+            echo "CRON=${CRON}"
+            echo "MAIL=${MAIL}"
+          args:
+            executable: /bin/bash
+          register: r_patterns
+          changed_when: false
+          failed_when: false
+          when: rsyslog_installed == "YES"
+    
+        - name: "U-66 | set pattern facts"
+          ansible.builtin.set_fact:
+            has_authpriv: "{{ (r_patterns.stdout_lines | select('match','^AUTHPRIV=') | list | first | default('AUTHPRIV=NO')).split('=')[1] }}"
+            has_info: "{{ (r_patterns.stdout_lines | select('match','^INFO=') | list | first | default('INFO=NO')).split('=')[1] }}"
+            has_cron: "{{ (r_patterns.stdout_lines | select('match','^CRON=') | list | first | default('CRON=NO')).split('=')[1] }}"
+            has_mail: "{{ (r_patterns.stdout_lines | select('match','^MAIL=') | list | first | default('MAIL=NO')).split('=')[1] }}"
+          changed_when: false
+          when: rsyslog_installed == "YES"
+    
+        - name: "U-66 | compute config flags"
+          ansible.builtin.set_fact:
+            U_66_2: "{{ (rsyslog_installed != 'YES') | ternary(1, (has_authpriv != 'YES') | ternary(1,0)) }}"
+            U_66_3: "{{ (rsyslog_installed != 'YES') | ternary(1, (has_info != 'YES') | ternary(1,0)) }}"
+            U_66_4: "{{ (rsyslog_installed != 'YES') | ternary(1, (has_cron != 'YES') | ternary(1,0)) }}"
+            U_66_5: "{{ (rsyslog_installed != 'YES') | ternary(1, (has_mail != 'YES') | ternary(1,0)) }}"
+          changed_when: false
+    
+        - name: "U-66 | ts (pattern check)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_662_a
+          changed_when: false
+    
+        - name: "U-66 | build step2 cmd/result safely"
+          ansible.builtin.set_fact:
+            u66_step_cmd_2: "grep -rE authpriv\\.* / \\*\\.info / cron\\.* / mail\\.* over {{ RSYSLOG_MAIN_CONF }} and {{ RSYSLOG_D_DIR }} (exclude comments)"
+            u66_step_res_2: >-
+              authpriv={{ has_authpriv }}, info={{ has_info }}, cron={{ has_cron }}, mail={{ has_mail }},
+              U_66_2={{ U_66_2 }}, U_66_3={{ U_66_3 }}, U_66_4={{ U_66_4 }}, U_66_5={{ U_66_5 }}
+          changed_when: false
+    
+        - name: "U-66 | LOG step JSONL (pattern status)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_662_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_66_2~U_66_5] rsyslog 정책 라인(authpriv/*.info/cron/mail) 존재 여부",
+                  "cmd": (u66_step_cmd_2 | default("")),
+                  "result": (u66_step_res_2 | default(""))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # 조치 (자동조치 가능한 범위)
+        # - rsyslog 미설치: 패키지 설치는 운영정책/영향 고려 필요 → 자동조치 금지(info)
+        # - 설치됨: 서비스 비활성 시 enable+start 시도 (best-effort)
+        # - 정책 라인 미흡: drop-in 파일에 표준 라인 블록 반영(blockinfile)
+        # ---------------------------------------------------------
+        - name: "U-66 | enable+start rsyslog when installed but inactive"
+          ansible.builtin.systemd:
+            name: "rsyslog"
+            enabled: true
+            state: started
+          register: r_rsyslog_enable
+          failed_when: false
+          when:
+            - rsyslog_installed == "YES"
+            - rsyslog_active != "YES"
+    
+        - name: "U-66 | apply policy lines via drop-in (when installed)"
+          ansible.builtin.blockinfile:
+            path: "{{ RSYSLOG_DROPIN }}"
+            create: true
+            backup: true
+            marker: "# {mark} U-66 policy"
+            block: |
+              # U-66 policy (standard examples)
+              *.info;mail.none;authpriv.none;cron.none    /var/log/messages
+              auth,authpriv.*                            /var/log/secure
+              mail.*                                     /var/log/maillog
+              cron.*                                     /var/log/cron
+              *.alert                                    /dev/console
+              *.emerg                                    *
+          register: r_u66_conf
+          when:
+            - rsyslog_installed == "YES"
+            - rsyslog_d_exists | bool
+    
+        - name: "U-66 | restart rsyslog when config changed"
+          ansible.builtin.systemd:
+            name: "rsyslog"
+            state: restarted
+          register: r_rsyslog_restart
+          failed_when: false
+          when:
+            - rsyslog_installed == "YES"
+            - (r_u66_conf.changed | default(false)) | bool
+    
+        - name: "U-66 | ts (remediation)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_663_a
+          changed_when: false
+    
+        - name: "U-66 | build step3 cmd/result safely"
+          ansible.builtin.set_fact:
+            u66_step_cmd_3: "systemd enable+start rsyslog (if inactive) ; blockinfile {{ RSYSLOG_DROPIN }} ; systemd restart rsyslog (if config changed)"
+            u66_step_res_3: >-
+              enable_start_changed={{ (r_rsyslog_enable.changed | default(false)) | string }},
+              policy_changed={{ (r_u66_conf.changed | default(false)) | string }},
+              restarted_attempted={{ (r_rsyslog_restart is defined) | ternary('YES','NO') }}
+          changed_when: false
+    
+        - name: "U-66 | LOG step JSONL (remediation actions)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_663_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_66] rsyslog 활성/정책 라인 반영 조치",
+                  "cmd": (u66_step_cmd_3 | default("")),
+                  "result": (u66_step_res_3 | default(""))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # LOG basis (상태)
+        # - rsyslog 미설치: info
+        # - 설치됐지만 rsyslog.d 미존재(드랍인 불가): info (대상 경로/배포 확인 필요)
+        # - 그 외: 변경 발생 시 취약, 변경 없으면 양호
+        # ---------------------------------------------------------
+        - name: "U-66 | build basis/status safely"
+          ansible.builtin.set_fact:
+            u66_basis_msg: >-
+              {% if rsyslog_installed != 'YES' -%}
+              [U_66] rsyslog 미설치로 로깅 정책(/etc/rsyslog.conf 및 /etc/rsyslog.d) 적용 대상이 없어 자동조치 불가(info) — 패키지 설치/운영정책 확인 필요
+              {%- elif (rsyslog_d_exists | bool) != true -%}
+              [U_66] rsyslog 설치는 확인되나 /etc/rsyslog.d 디렉터리 미존재로 표준 drop-in 정책 파일(99-u66-policy.conf) 반영이 불가(info) — 배포 표준/경로 확인 필요
+              {%- else -%}
+              [U_66] rsyslog 정책 라인(authpriv.* / *.info / cron.* / mail.* 및 console/emerg) 반영 및 필요 시 서비스 재시작 수행(또는 이미 기준 충족)
+              {%- endif %}
+            u66_status_val: >-
+              {% if rsyslog_installed != 'YES' -%}
+              info
+              {%- elif (rsyslog_d_exists | bool) != true -%}
+              info
+              {%- else -%}
+              {{
+                (
+                  ((r_rsyslog_enable.changed | default(false)) | bool)
+                  or
+                  ((r_u66_conf.changed | default(false)) | bool)
+                ) | ternary('취약','양호')
+              }}
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-66 | ts (basis)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_66b
+          changed_when: false
+    
+        - name: "U-66 | LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_66b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u66_basis_msg | default("")),
+                  "status": (u66_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false

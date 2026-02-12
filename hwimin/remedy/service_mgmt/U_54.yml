@@ -1,0 +1,619 @@
+---
+- name: "U-54 | Remediate Unencrypted FTP Services (Controlled Env, Logs-Only JSONL)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U-54"
+
+    inetd_conf: "/etc/inetd.conf"
+    xinetd_ftp_conf: "/etc/xinetd.d/ftp"
+
+    LOG_SECTION_STEP: "[조치 내용]"
+    LOG_SECTION_BASIS: "[조치 결과]"
+    LOG_TITLE_BASIS: "조치 근거"
+    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 기본값: 스킵/실패로 미정의 터짐 방지
+    # ---------------------------------------------------------
+    - name: "U-54 | init defaults"
+      ansible.builtin.set_fact:
+        r_inetd_comment: {}
+        r_inetd_restart: {}
+        r_xinetd_disable: {}
+        r_xinetd_restart: {}
+        r_vsftpd: {}
+        r_proftpd: {}
+        st_inetd: {}
+        st_xinetd_ftp: {}
+        vsftpd_unit: {}
+        proftpd_unit: {}
+      changed_when: false
+
+    # =========================================================
+    # 조치 1) inetd: /etc/inetd.conf 내 ftp 라인 주석 처리
+    # =========================================================
+    - name: "U-54 | [U_54_1] stat inetd.conf"
+      ansible.builtin.stat:
+        path: "{{ inetd_conf }}"
+      register: st_inetd
+      changed_when: false
+
+    - name: "U-54 | [U_54_1] ts"
+      ansible.builtin.command: "{{ LOG_TS_CMD }}"
+      register: ts_541_a
+      changed_when: false
+
+    - name: "U-54 | [U_54_1] LOG step (inetd.conf existence) JSONL"
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            {
+              "ts": (ts_541_a.stdout | default("")),
+              "flag_id": FLAG_ID,
+              "section": LOG_SECTION_STEP,
+              "title": "[U_54_1] inetd.conf 파일 존재 여부",
+              "cmd": "[ -f " ~ inetd_conf ~ " ]",
+              "result": (st_inetd.stat.exists | default(false)) | ternary("파일 존재","파일 없음")
+            } | to_json
+          }}
+      changed_when: false
+
+    - name: "U-54 | [U_54_1] LOG basis (inetd.conf missing → info) JSONL"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_541_na
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_541_na.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": "[U_54_1] inetd_conf(" ~ inetd_conf ~ ") 미존재: inetd 기반 FTP 서비스 미사용/미설치 또는 표준 경로 비대상 가능 — 조치 타겟 부재로 ftp 라인 주석처리(replace) 자동조치 불가(info) — 담당자 확인 필요",
+                  "status": "info"
+                } | to_json
+              }}
+          changed_when: false
+      when: not (st_inetd.stat.exists | default(false))
+
+    - name: "U-54 | [U_54_1] inetd ftp 라인 주석 처리"
+      ansible.builtin.replace:
+        path: "{{ inetd_conf }}"
+        regexp: '^(?![[:space:]]*#)([[:space:]]*ftp[[:space:]].*)$'
+        replace: '# \1'
+        backup: yes
+      register: r_inetd_comment
+      when: st_inetd.stat.exists | default(false)
+
+    - name: "U-54 | [U_54_1] inetd replace 결과 LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_541_b
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_541_b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_1] inetd.conf 내 ftp 라인 주석 처리",
+                  "cmd": "replace: regexp=^(?!#)(\\s*ftp\\s.*)$ -> '# \\1' @ " ~ inetd_conf,
+                  "result": "changed=" ~ (((r_inetd_comment.changed | default(false)) | bool) | string)
+                            ~ ", backup_file=" ~ (r_inetd_comment.backup_file | default("<none>"))
+                } | to_json
+              }}
+          changed_when: false
+      when: st_inetd.stat.exists | default(false)
+
+    - name: "U-54 | [U_54_1] inetd 재시작"
+      ansible.builtin.systemd:
+        name: "inetd"
+        state: restarted
+      when:
+        - st_inetd.stat.exists | default(false)
+        - (r_inetd_comment.changed | default(false)) | bool
+      register: r_inetd_restart
+      failed_when: false
+
+    - name: "U-54 | [U_54_1] inetd 재시작 LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_541_c
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_541_c.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_1] inetd 재시작",
+                  "cmd": "systemd: name=inetd state=restarted (when inetd_conf changed)",
+                  "result": "attempted=" ~ (((r_inetd_comment.changed | default(false)) | bool) | string)
+                            ~ ", changed=" ~ (((r_inetd_restart.changed | default(false)) | bool) | string)
+                            ~ ", failed=" ~ (((r_inetd_restart.failed | default(false)) | bool) | string)
+                            ~ ", msg=" ~ ((r_inetd_restart.msg | default("") | string) | truncate(160, True, "..."))
+                } | to_json
+              }}
+          changed_when: false
+      when: st_inetd.stat.exists | default(false)
+
+    - name: "U-54 | [U_54_1] inetd 조치 근거 LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_541_d
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_541_d.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "[U_54_1] inetd.conf ftp 라인 "
+                    ~ (((r_inetd_comment.changed | default(false)) | bool)
+                        | ternary("기준 미충족 상태를 교정 적용(주석 처리 수행)", "이미 주석/미존재로 변경 불필요(조치 불필요)"))
+                    ~ "; inetd 재시작 "
+                    ~ (((r_inetd_comment.changed | default(false)) | bool)
+                        | ternary("시도됨", "미시도(변경 없음)"))
+                    ~ "; 재시작 실패여부="
+                    ~ (((r_inetd_restart.failed | default(false)) | bool) | ternary("YES","NO"))
+                  ),
+                  "status": (((r_inetd_comment.changed | default(false)) | bool) | ternary("취약", "양호"))
+                } | to_json
+              }}
+          changed_when: false
+      when: st_inetd.stat.exists | default(false)
+
+    - name: "U-54 | [U_54_1] summary LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_541_s
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_541_s.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_1] summary",
+                  "cmd": "inetd: replace ftp line + optional restart",
+                  "result": "exists=" ~ ((st_inetd.stat.exists | default(false)) | string)
+                            ~ ", replaced_changed=" ~ ((((r_inetd_comment.changed | default(false)) | bool) | string))
+                            ~ ", restart_failed=" ~ ((((r_inetd_restart.failed | default(false)) | bool) | string))
+                } | to_json
+              }}
+          changed_when: false
+      when: st_inetd is defined
+
+    # =========================================================
+    # 조치 2) xinetd: /etc/xinetd.d/ftp disable = yes 설정
+    # =========================================================
+    - name: "U-54 | [U_54_2] stat xinetd ftp conf"
+      ansible.builtin.stat:
+        path: "{{ xinetd_ftp_conf }}"
+      register: st_xinetd_ftp
+      changed_when: false
+
+    - name: "U-54 | [U_54_2] ts"
+      ansible.builtin.command: "{{ LOG_TS_CMD }}"
+      register: ts_542_a
+      changed_when: false
+
+    - name: "U-54 | [U_54_2] LOG step (xinetd ftp conf existence) JSONL"
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            {
+              "ts": (ts_542_a.stdout | default("")),
+              "flag_id": FLAG_ID,
+              "section": LOG_SECTION_STEP,
+              "title": "[U_54_2] xinetd.d/ftp 파일 존재 여부",
+              "cmd": "[ -f " ~ xinetd_ftp_conf ~ " ]",
+              "result": (st_xinetd_ftp.stat.exists | default(false)) | ternary("파일 존재","파일 없음")
+            } | to_json
+          }}
+      changed_when: false
+
+    - name: "U-54 | [U_54_2] LOG basis (xinetd ftp conf missing → info) JSONL"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_542_na
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_542_na.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": "[U_54_2] xinetd_ftp_conf(" ~ xinetd_ftp_conf ~ ") 미존재: xinetd 기반 FTP 서비스 미사용/미설치 또는 표준 경로 비대상 가능 — 조치 타겟 부재로 disable=yes(lineinfile) 자동조치 불가(info) — 담당자 확인 필요",
+                  "status": "info"
+                } | to_json
+              }}
+          changed_when: false
+      when: not (st_xinetd_ftp.stat.exists | default(false))
+
+    - name: "U-54 | [U_54_2] disable=yes 적용"
+      ansible.builtin.lineinfile:
+        path: "{{ xinetd_ftp_conf }}"
+        regexp: '^[[:space:]]*disable[[:space:]]*='
+        line: '        disable = yes'
+        backup: yes
+        create: no
+      register: r_xinetd_disable
+      when: st_xinetd_ftp.stat.exists | default(false)
+
+    - name: "U-54 | [U_54_2] xinetd disable 결과 LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_542_b
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_542_b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_2] xinetd ftp 설정 disable=yes 적용",
+                  "cmd": "lineinfile: regexp='^\\s*disable\\s*=' line='disable = yes' @ " ~ xinetd_ftp_conf,
+                  "result": "changed=" ~ (((r_xinetd_disable.changed | default(false)) | bool) | string)
+                            ~ ", backup_file=" ~ (r_xinetd_disable.backup_file | default("<none>"))
+                } | to_json
+              }}
+          changed_when: false
+      when: st_xinetd_ftp.stat.exists | default(false)
+
+    - name: "U-54 | [U_54_2] xinetd 재시작"
+      ansible.builtin.systemd:
+        name: "xinetd"
+        state: restarted
+      when:
+        - st_xinetd_ftp.stat.exists | default(false)
+        - (r_xinetd_disable.changed | default(false)) | bool
+      register: r_xinetd_restart
+      failed_when: false
+
+    - name: "U-54 | [U_54_2] xinetd 재시작 LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_542_r
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_542_r.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_2] xinetd 재시작",
+                  "cmd": "systemd: name=xinetd state=restarted (when xinetd ftp conf changed)",
+                  "result": "attempted=" ~ (((r_xinetd_disable.changed | default(false)) | bool) | string)
+                            ~ ", changed=" ~ (((r_xinetd_restart.changed | default(false)) | bool) | string)
+                            ~ ", failed=" ~ (((r_xinetd_restart.failed | default(false)) | bool) | string)
+                            ~ ", msg=" ~ ((r_xinetd_restart.msg | default("") | string) | truncate(160, True, "..."))
+                } | to_json
+              }}
+          changed_when: false
+      when: st_xinetd_ftp.stat.exists | default(false)
+
+    - name: "U-54 | [U_54_2] xinetd 조치 근거 LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_542_c
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_542_c.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "[U_54_2] /etc/xinetd.d/ftp disable=yes "
+                    ~ (((r_xinetd_disable.changed | default(false)) | bool)
+                        | ternary("기준 미충족 상태를 교정 적용(조치 수행)", "이미 disable=yes 또는 변경 불필요(조치 불필요)"))
+                    ~ "; xinetd 재시작 "
+                    ~ (((r_xinetd_disable.changed | default(false)) | bool)
+                        | ternary("시도됨", "미시도(변경 없음)"))
+                    ~ "; 재시작 실패여부="
+                    ~ (((r_xinetd_restart.failed | default(false)) | bool) | ternary("YES","NO"))
+                  ),
+                  "status": (((r_xinetd_disable.changed | default(false)) | bool) | ternary("취약", "양호"))
+                } | to_json
+              }}
+          changed_when: false
+      when: st_xinetd_ftp.stat.exists | default(false)
+
+    - name: "U-54 | [U_54_2] summary LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_542_s
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_542_s.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_2] summary",
+                  "cmd": "xinetd: set disable=yes + optional restart",
+                  "result": "exists=" ~ ((st_xinetd_ftp.stat.exists | default(false)) | string)
+                            ~ ", line_changed=" ~ ((((r_xinetd_disable.changed | default(false)) | bool) | string))
+                            ~ ", restart_failed=" ~ ((((r_xinetd_restart.failed | default(false)) | bool) | string))
+                } | to_json
+              }}
+          changed_when: false
+      when: st_xinetd_ftp is defined
+
+    # =========================================================
+    # 조치 3) vsftpd: stop + disable
+    # - 서비스 미존재/비대상은 "구체 사유 info"로 남기고 skip
+    # =========================================================
+    - name: "U-54 | [U_54_3] detect vsftpd unit"
+      ansible.builtin.shell: |
+        systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "vsftpd.service" && echo "YES" || echo "NO"
+      args:
+        executable: /bin/bash
+      register: vsftpd_unit
+      changed_when: false
+      failed_when: false
+
+    - name: "U-54 | [U_54_3] vsftpd unit missing LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_543_na
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_543_na.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": "[U_54_3] vsftpd.service 유닛 미존재: 패키지 미설치/서비스 미사용 또는 표준화 배포 비대상 가능 — systemd stop+disable 조치 타겟 부재로 자동조치 불가(info) — 담당자 확인 필요",
+                  "status": "info"
+                } | to_json
+              }}
+          changed_when: false
+      when: (vsftpd_unit.stdout | default("NO")) != "YES"
+
+    - name: "U-54 | [U_54_3] vsftpd stop+disable"
+      block:
+        - name: "vsftpd systemd"
+          ansible.builtin.systemd:
+            name: "vsftpd"
+            state: stopped
+            enabled: false
+          register: r_vsftpd
+          failed_when: false
+
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_543_a
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_543_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_3] vsftpd 중지 및 비활성화",
+                  "cmd": "systemd: name=vsftpd state=stopped enabled=false",
+                  "result": "changed=" ~ (((r_vsftpd.changed | default(false)) | bool) | string)
+                            ~ ", failed=" ~ (((r_vsftpd.failed | default(false)) | bool) | string)
+                            ~ ", msg=" ~ ((r_vsftpd.msg | default("") | string) | truncate(160, True, "..."))
+                } | to_json
+              }}
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_543_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "[U_54_3] vsftpd stop+disable "
+                    ~ (((r_vsftpd.changed | default(false)) | bool)
+                        | ternary("기준 미충족 상태를 교정 적용(조치 수행)", "이미 중지/비활성 상태로 변경 불필요(조치 불필요)"))
+                    ~ "; 실행 실패여부="
+                    ~ (((r_vsftpd.failed | default(false)) | bool) | ternary("YES","NO"))
+                  ),
+                  "status": (((r_vsftpd.changed | default(false)) | bool) | ternary("취약", "양호"))
+                } | to_json
+              }}
+          changed_when: false
+      when: (vsftpd_unit.stdout | default("NO")) == "YES"
+
+    - name: "U-54 | [U_54_3] summary LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_543_s
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_543_s.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_3] summary",
+                  "cmd": "vsftpd: detect unit + stop/disable when present",
+                  "result": "unit=" ~ (vsftpd_unit.stdout | default("NO"))
+                            ~ ", changed=" ~ ((((r_vsftpd.changed | default(false)) | bool) | string))
+                            ~ ", failed=" ~ ((((r_vsftpd.failed | default(false)) | bool) | string))
+                } | to_json
+              }}
+          changed_when: false
+
+    # =========================================================
+    # 조치 4) proftpd: stop + disable
+    # - 서비스 미존재/비대상은 "구체 사유 info"로 남기고 skip
+    # =========================================================
+    - name: "U-54 | [U_54_4] detect proftpd unit"
+      ansible.builtin.shell: |
+        systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "proftpd.service" && echo "YES" || echo "NO"
+      args:
+        executable: /bin/bash
+      register: proftpd_unit
+      changed_when: false
+      failed_when: false
+
+    - name: "U-54 | [U_54_4] proftpd unit missing LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_544_na
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_544_na.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": "[U_54_4] proftpd.service 유닛 미존재: 패키지 미설치/서비스 미사용 또는 표준화 배포 비대상 가능 — systemd stop+disable 조치 타겟 부재로 자동조치 불가(info) — 담당자 확인 필요",
+                  "status": "info"
+                } | to_json
+              }}
+          changed_when: false
+      when: (proftpd_unit.stdout | default("NO")) != "YES"
+
+    - name: "U-54 | [U_54_4] proftpd stop+disable"
+      block:
+        - name: "proftpd systemd"
+          ansible.builtin.systemd:
+            name: "proftpd"
+            state: stopped
+            enabled: false
+          register: r_proftpd
+          failed_when: false
+
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_544_a
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_544_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_4] proftpd 중지 및 비활성화",
+                  "cmd": "systemd: name=proftpd state=stopped enabled=false",
+                  "result": "changed=" ~ (((r_proftpd.changed | default(false)) | bool) | string)
+                            ~ ", failed=" ~ (((r_proftpd.failed | default(false)) | bool) | string)
+                            ~ ", msg=" ~ ((r_proftpd.msg | default("") | string) | truncate(160, True, "..."))
+                } | to_json
+              }}
+          changed_when: false
+
+        - name: "LOG basis"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_544_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    "[U_54_4] proftpd stop+disable "
+                    ~ (((r_proftpd.changed | default(false)) | bool)
+                        | ternary("기준 미충족 상태를 교정 적용(조치 수행)", "이미 중지/비활성 상태로 변경 불필요(조치 불필요)"))
+                    ~ "; 실행 실패여부="
+                    ~ (((r_proftpd.failed | default(false)) | bool) | ternary("YES","NO"))
+                  ),
+                  "status": (((r_proftpd.changed | default(false)) | bool) | ternary("취약", "양호"))
+                } | to_json
+              }}
+          changed_when: false
+      when: (proftpd_unit.stdout | default("NO")) == "YES"
+
+    - name: "U-54 | [U_54_4] summary LOG(JSONL)"
+      block:
+        - name: "ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_544_s
+          changed_when: false
+
+        - name: "LOG step"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_544_s.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_54_4] summary",
+                  "cmd": "proftpd: detect unit + stop/disable when present",
+                  "result": "unit=" ~ (proftpd_unit.stdout | default("NO"))
+                            ~ ", changed=" ~ ((((r_proftpd.changed | default(false)) | bool) | string))
+                            ~ ", failed=" ~ ((((r_proftpd.failed | default(false)) | bool) | string))
+                } | to_json
+              }}
+          changed_when: false

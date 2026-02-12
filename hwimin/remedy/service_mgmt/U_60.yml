@@ -1,0 +1,237 @@
+    ---
+    - name: "U-60 | Remediate SNMP Community String Complexity (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-60"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+        SNMPD_CONF: "/etc/snmp/snmpd.conf"
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-60 | init defaults"
+          ansible.builtin.set_fact:
+            snmp_conf_exists: false
+            os_family: "UNKNOWN"
+            community_strings: []
+            weak_strings: []
+          changed_when: false
+    
+        # =========================================================
+        # U_60_1 : OS 계열 판별
+        # =========================================================
+        - name: "U-60 | detect OS family"
+          ansible.builtin.shell: |
+            if [ -f /etc/redhat-release ]; then
+              echo "REDHAT"
+            elif [ -f /etc/debian_version ]; then
+              echo "DEBIAN"
+            else
+              echo "UNKNOWN"
+            fi
+          args:
+            executable: /bin/bash
+          register: r_os
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-60 | set os_family"
+          ansible.builtin.set_fact:
+            os_family: "{{ r_os.stdout | default('UNKNOWN') }}"
+          changed_when: false
+    
+        # =========================================================
+        # U_60_2 : snmpd.conf 존재 여부
+        # =========================================================
+        - name: "U-60 | stat snmpd.conf"
+          ansible.builtin.stat:
+            path: "{{ SNMPD_CONF }}"
+          register: st_snmpd
+          changed_when: false
+    
+        - name: "U-60 | set snmp_conf_exists"
+          ansible.builtin.set_fact:
+            snmp_conf_exists: "{{ st_snmpd.stat.exists | default(false) }}"
+          changed_when: false
+    
+        - name: "U-60 | ts (conf existence)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_601_a
+          changed_when: false
+    
+        - name: "U-60 | LOG step (conf existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_601_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_60_1] snmpd.conf 파일 존재 여부",
+                  "cmd": "[ -f " ~ SNMPD_CONF ~ " ]",
+                  "result": (snmp_conf_exists | ternary("파일 존재","파일 없음"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # U_60_3 : Community String 추출 및 복잡성 판단
+        # - REDHAT: com2sec ... <community>
+        # - DEBIAN: rocommunity/rwcommunity <community> ...
+        # =========================================================
+        - name: "U-60 | collect community strings"
+          ansible.builtin.shell: |
+            set -o pipefail
+            CONF="{{ SNMPD_CONF }}"
+            if [ ! -f "$CONF" ]; then
+              exit 0
+            fi
+    
+            if [ "{{ os_family }}" = "REDHAT" ]; then
+              # com2sec <secName> <source> <community>
+              grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null | grep -E "^[[:space:]]*com2sec[[:space:]]+" | awk '{print $4}'
+            elif [ "{{ os_family }}" = "DEBIAN" ]; then
+              # rocommunity <community> ...
+              # rwcommunity <community> ...
+              grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null | grep -E "^[[:space:]]*(rocommunity|rwcommunity)[[:space:]]+" | awk '{print $2}'
+            else
+              exit 0
+            fi
+          args:
+            executable: /bin/bash
+          register: r_strings
+          changed_when: false
+          failed_when: false
+          when: snmp_conf_exists
+    
+        - name: "U-60 | normalize community strings"
+          ansible.builtin.set_fact:
+            community_strings: >-
+              {{
+                (r_strings.stdout_lines | default([]))
+                | map('trim') | reject('equalto','') | list
+              }}
+          changed_when: false
+          when: snmp_conf_exists
+    
+        # weak 기준:
+        # 1) public/private
+        # 2) 영문+숫자만 포함 AND 길이 1~9 (특수문자 없음 + 10자 미만)
+        - name: "U-60 | evaluate weak community strings"
+          ansible.builtin.set_fact:
+            weak_strings: >-
+              {{
+                (
+                  (community_strings | select('match','^(public|private)$') | list)
+                  +
+                  (community_strings | select('match','^[A-Za-z0-9]{1,9}$') | list)
+                )
+                | unique | list
+              }}
+          changed_when: false
+          when: snmp_conf_exists
+    
+        - name: "U-60 | ts (community check)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_601_b
+          changed_when: false
+    
+        - name: "U-60 | LOG step (community analysis) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_601_b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_60_1] SNMP Community String 복잡성 점검",
+                  "cmd": "parse snmpd.conf (OS=" ~ os_family ~ "), extract community values",
+                  "result": (
+                    (((weak_strings | length) > 0) | ternary(
+                      "취약 스트링 발견: " ~ (weak_strings | join(",")),
+                      "취약 스트링 미발견"
+                    ))
+                  )
+                } | to_json
+              }}
+          changed_when: false
+          when: snmp_conf_exists
+    
+        # =========================================================
+        # U_60_4 : basis 로그 (자동조치 금지)
+        # =========================================================
+        - name: "U-60 | ts (basis)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_601_c
+          changed_when: false
+    
+        - name: "U-60 | LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_601_c.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    (not snmp_conf_exists)
+                    | ternary(
+                        "[U_60_1] SNMP 설정파일 미존재: SNMP 서비스 미사용 또는 비대상 환경으로 판단(조치 불필요)",
+                        (
+                          (((weak_strings | length) > 0)
+                          | ternary(
+                              "[U_60_1] 기본값(public/private) 또는 복잡성 기준(영문+숫자만 & 10자 미만) 미달 Community String 발견 — 인증정보/운영 영향 검토가 필요하여 자동조치 불가(info) — 담당자 수동조치 대상",
+                              "[U_60_1] Community String이 기본값이 아니며 복잡성 기준 충족(양호)"
+                            ))
+                        )
+                      )
+                  ),
+                  "status": (
+                    (not snmp_conf_exists)
+                    | ternary(
+                        "양호",
+                        ((((weak_strings | length) > 0) | ternary("info","양호")))
+                      )
+                  )
+                } | to_json
+              }}
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # (블록 말미) summary 로그
+        # ---------------------------------------------------------
+        - name: "U-60 | summary LOG(JSONL)"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_601_s
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_601_s.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_60_1] summary",
+                      "cmd": "detect OS + parse snmpd.conf + evaluate community complexity (no auto-change)",
+                      "result": "os=" ~ os_family
+                                ~ ", conf_exists=" ~ (snmp_conf_exists | string)
+                                ~ ", community_count=" ~ ((community_strings | length) | string)
+                                ~ ", weak_count=" ~ ((weak_strings | length) | string)
+                    } | to_json
+                  }}
+              changed_when: false

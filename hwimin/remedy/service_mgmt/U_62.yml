@@ -1,0 +1,959 @@
+    ---
+    - name: "U-62 | Remediate Login Warning Banner (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-62"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+        # ===== 정책 문구(운영자 지정) =====
+        # 비어있으면 자동조치 금지(info)로만 기록합니다.
+        BANNER_TEXT: ""
+    
+        # ===== 공통 파일 =====
+        MOTD_PATH: "/etc/motd"
+        ISSUE_PATH: "/etc/issue"
+        ISSUE_NET_PATH: "/etc/issue.net"
+    
+        # ===== SSH =====
+        SSHD_CONFIG: "/etc/ssh/sshd_config"
+        SSH_SERVICE_CANDIDATES: ["sshd", "ssh"]     # RHEL계열: sshd, Debian계열: ssh
+        SSH_BANNER_TARGET: "/etc/issue.net"         # Banner 파일로 사용할 표준 경로
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-62 | init defaults"
+          ansible.builtin.set_fact:
+            os_family: "UNKNOWN"        # REDHAT/DEBIAN/UNKNOWN
+            banner_ready: "NO"
+    
+            has_telnet: "NO"
+            has_sendmail: "NO"
+            has_postfix: "NO"
+            has_exim: "NO"
+            has_vsftpd: "NO"
+            has_proftpd: "NO"
+            has_bind: "NO"
+    
+            ssh_service_name: ""
+            bind_conf_path: ""
+            exim_conf_path: ""
+            vsftpd_conf_path: ""
+            proftpd_conf_path: ""
+            proftpd_welcome_path: ""
+    
+            st_sshd_config: { stat: { exists: false } }
+            st_postfix_main: { stat: { exists: false } }
+            st_motd: { stat: { exists: false } }
+            st_issue: { stat: { exists: false } }
+            st_issue_net: { stat: { exists: false } }
+    
+            # helper(템플릿 오류 방지용): basis/status 문자열은 여기로 확정
+            u622_basis_msg: ""
+            u622_status_val: ""
+            u623_basis_msg: ""
+            u623_status_val: ""
+            u625_basis_msg: ""
+            u625_status_val: ""
+            u626_basis_msg: ""
+            u626_status_val: ""
+            u627_basis_msg: ""
+            u627_status_val: ""
+            u628_basis_msg: ""
+            u628_status_val: ""
+            u629_basis_msg: ""
+            u629_status_val: ""
+    
+            r_u621_motd: {}
+            r_u621_issue: {}
+            r_u622_issue_net: {}
+            r_u623_banner: {}
+            r_u623_bannerfile: {}
+            r_u623_restart: {}
+            r_u625_postfix: {}
+            r_u625_restart: {}
+            r_u626_exim: {}
+            r_u626_restart: {}
+            r_u627_vsftpd: {}
+            r_u627_restart: {}
+            r_u628_welcome: {}
+            r_u628_restart: {}
+            r_u629_bind: {}
+            r_u629_restart_raw: {}
+          changed_when: false
+    
+        - name: "U-62 | set banner_ready"
+          ansible.builtin.set_fact:
+            banner_ready: "{{ ((BANNER_TEXT | default('') | trim) != '') | ternary('YES','NO') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # core file stat
+        # ---------------------------------------------------------
+        - name: "U-62 | stat core files"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ SSHD_CONFIG }}"
+            - "/etc/postfix/main.cf"
+            - "{{ MOTD_PATH }}"
+            - "{{ ISSUE_PATH }}"
+            - "{{ ISSUE_NET_PATH }}"
+          register: st_core_files
+          changed_when: false
+    
+        - name: "U-62 | map stat results"
+          ansible.builtin.set_fact:
+            st_sshd_config: "{{ (st_core_files.results | selectattr('item','equalto',SSHD_CONFIG) | list | first) | default({'stat':{'exists':false}}) }}"
+            st_postfix_main: "{{ (st_core_files.results | selectattr('item','equalto','/etc/postfix/main.cf') | list | first) | default({'stat':{'exists':false}}) }}"
+            st_motd: "{{ (st_core_files.results | selectattr('item','equalto',MOTD_PATH) | list | first) | default({'stat':{'exists':false}}) }}"
+            st_issue: "{{ (st_core_files.results | selectattr('item','equalto',ISSUE_PATH) | list | first) | default({'stat':{'exists':false}}) }}"
+            st_issue_net: "{{ (st_core_files.results | selectattr('item','equalto',ISSUE_NET_PATH) | list | first) | default({'stat':{'exists':false}}) }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # OS family detect
+        # ---------------------------------------------------------
+        - name: "U-62 | detect OS family"
+          ansible.builtin.shell: |
+            if [ -f /etc/redhat-release ]; then
+              echo "REDHAT"
+            elif [ -f /etc/debian_version ]; then
+              echo "DEBIAN"
+            else
+              echo "UNKNOWN"
+            fi
+          args:
+            executable: /bin/bash
+          register: r_os
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-62 | set os_family"
+          ansible.builtin.set_fact:
+            os_family: "{{ r_os.stdout | default('UNKNOWN') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # package detect
+        # ---------------------------------------------------------
+        - name: "U-62 | detect packages (rpm/dpkg best-effort)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            if command -v rpm >/dev/null 2>&1; then
+              rpm -qa || true
+            elif command -v dpkg-query >/dev/null 2>&1; then
+              dpkg-query -W -f='${Package}\n' 2>/dev/null || true
+            else
+              true
+            fi
+          args:
+            executable: /bin/bash
+          register: r_pkgs
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-62 | set has_* facts"
+          ansible.builtin.set_fact:
+            has_telnet: "{{ ((r_pkgs.stdout | default('')) is search('telnet-server') or (r_pkgs.stdout | default('')) is search('telnetd')) | ternary('YES','NO') }}"
+            has_sendmail: "{{ ((r_pkgs.stdout | default('')) is search('sendmail')) | ternary('YES','NO') }}"
+            has_postfix: "{{ ((r_pkgs.stdout | default('')) is search('postfix')) | ternary('YES','NO') }}"
+            has_exim: "{{ ((r_pkgs.stdout | default('')) is search('exim')) | ternary('YES','NO') }}"
+            has_vsftpd: "{{ ((r_pkgs.stdout | default('')) is search('vsftpd')) | ternary('YES','NO') }}"
+            has_proftpd: "{{ ((r_pkgs.stdout | default('')) is search('proftpd')) | ternary('YES','NO') }}"
+            has_bind: "{{ ((r_pkgs.stdout | default('')) is search('bind') or (r_pkgs.stdout | default('')) is search('bind9')) | ternary('YES','NO') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # SSH service pick
+        # ---------------------------------------------------------
+        - name: "U-62 | pick ssh service name"
+          ansible.builtin.shell: |
+            for s in {{ SSH_SERVICE_CANDIDATES | join(' ') }}; do
+              systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "${s}.service" && echo "$s" && exit 0
+            done
+            echo ""
+          args:
+            executable: /bin/bash
+          register: r_sshsvc
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-62 | set ssh_service_name"
+          ansible.builtin.set_fact:
+            ssh_service_name: "{{ r_sshsvc.stdout | default('') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # bind conf pick
+        # ---------------------------------------------------------
+        - name: "U-62 | stat bind conf candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/named.conf"
+            - "/etc/bind/named.conf.options"
+            - "/etc/bind/named.conf"
+          register: st_bind
+          changed_when: false
+    
+        - name: "U-62 | pick bind_conf_path"
+          ansible.builtin.set_fact:
+            bind_conf_path: >-
+              {{
+                (st_bind.results | selectattr('stat.exists','equalto',true) | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # exim conf pick
+        # ---------------------------------------------------------
+        - name: "U-62 | stat exim conf candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/exim/exim.conf"
+            - "/etc/exim4/exim4.conf"
+            - "/etc/exim.conf"
+          register: st_exim
+          changed_when: false
+    
+        - name: "U-62 | pick exim_conf_path"
+          ansible.builtin.set_fact:
+            exim_conf_path: >-
+              {{
+                (st_exim.results | selectattr('stat.exists','equalto',true) | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # vsftpd conf pick
+        # ---------------------------------------------------------
+        - name: "U-62 | stat vsftpd conf candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/vsftpd/vsftpd.conf"
+            - "/etc/vsftpd.conf"
+          register: st_vs
+          changed_when: false
+    
+        - name: "U-62 | pick vsftpd_conf_path"
+          ansible.builtin.set_fact:
+            vsftpd_conf_path: >-
+              {{
+                (st_vs.results | selectattr('stat.exists','equalto',true) | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # proftpd conf pick + DisplayLogin path
+        # ---------------------------------------------------------
+        - name: "U-62 | stat proftpd conf candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/proftpd.conf"
+            - "/etc/proftpd/proftpd.conf"
+          register: st_pro
+          changed_when: false
+    
+        - name: "U-62 | pick proftpd_conf_path"
+          ansible.builtin.set_fact:
+            proftpd_conf_path: >-
+              {{
+                (st_pro.results | selectattr('stat.exists','equalto',true) | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        - name: "U-62 | read proftpd DisplayLogin path"
+          ansible.builtin.shell: |
+            set -o pipefail
+            CONF="{{ proftpd_conf_path }}"
+            if [ -z "$CONF" ] || [ ! -f "$CONF" ]; then
+              echo ""; exit 0
+            fi
+            v=$(grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null \
+                | grep -i "^[[:space:]]*DisplayLogin[[:space:]]+" \
+                | tail -n 1 | awk '{print $2}')
+            echo "${v:-}"
+          args:
+            executable: /bin/bash
+          register: r_pro_welcome
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-62 | set proftpd_welcome_path"
+          ansible.builtin.set_fact:
+            proftpd_welcome_path: "{{ r_pro_welcome.stdout | default('') }}"
+          changed_when: false
+    
+        # =========================================================
+        # U_62_1 : [Server] /etc/motd, /etc/issue
+        # =========================================================
+        - name: "U-62 | [U_62_1] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_621_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_1] LOG step (policy ready) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_621_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_62_1] 서버 로그인 배너 정책 문구 제공 여부",
+                  "cmd": "BANNER_TEXT empty? (policy text required)",
+                  "result": "banner_ready=" ~ (banner_ready | default("NO"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_1] apply /etc/motd"
+          ansible.builtin.copy:
+            dest: "{{ MOTD_PATH }}"
+            content: "{{ BANNER_TEXT }}\n"
+            owner: root
+            group: root
+            mode: "0644"
+          register: r_u621_motd
+          when:
+            - banner_ready == "YES"
+            - st_motd.stat.exists | default(false)
+    
+        - name: "U-62 | [U_62_1] apply /etc/issue"
+          ansible.builtin.copy:
+            dest: "{{ ISSUE_PATH }}"
+            content: "{{ BANNER_TEXT }}\n"
+            owner: root
+            group: root
+            mode: "0644"
+          register: r_u621_issue
+          when:
+            - banner_ready == "YES"
+            - st_issue.stat.exists | default(false)
+    
+        - name: "U-62 | [U_62_1] LOG basis JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_621_b
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_621_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (
+                        (banner_ready != "YES")
+                        | ternary(
+                            "[U_62_1] 경고 문구는 조직 정책 문구로 값 확정이 필요하여 자동조치 금지(info) — BANNER_TEXT 미지정",
+                            "[U_62_1] /etc/motd 및 /etc/issue에 로그인 경고 메시지 반영(정책 문구 적용)"
+                          )
+                      ),
+                      "status": (
+                        (banner_ready != "YES")
+                        | ternary(
+                            "info",
+                            ((((r_u621_motd.changed|default(false))|bool) or ((r_u621_issue.changed|default(false))|bool)) | ternary("취약","양호"))
+                          )
+                      )
+                    } | to_json
+                  }}
+              changed_when: false
+    
+        # =========================================================
+        # U_62_2 : [Telnet] /etc/issue.net
+        # =========================================================
+        - name: "U-62 | [U_62_2] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_622_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_2] LOG step (telnet detect) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_622_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_62_2] Telnet 사용 여부(패키지 기준) 확인",
+                  "cmd": "rpm/dpkg package detect: telnet-server/telnetd",
+                  "result": "has_telnet=" ~ (has_telnet | default("NO"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_2] apply /etc/issue.net"
+          ansible.builtin.copy:
+            dest: "{{ ISSUE_NET_PATH }}"
+            content: "{{ BANNER_TEXT }}\n"
+            owner: root
+            group: root
+            mode: "0644"
+          register: r_u622_issue_net
+          when:
+            - has_telnet == "YES"
+            - banner_ready == "YES"
+            - st_issue_net.stat.exists | default(false)
+    
+        - name: "U-62 | [U_62_2] build basis/status safely"
+          ansible.builtin.set_fact:
+            u622_basis_msg: >-
+              {% if has_telnet != 'YES' -%}
+              [U_62_2] Telnet 비대상(미설치/미사용)으로 /etc/issue.net 배너 조치 불필요(양호)
+              {%- elif banner_ready != 'YES' -%}
+              [U_62_2] Telnet 사용 가능 환경이나 경고 문구(BANNER_TEXT) 미지정으로 자동조치 금지(info)
+              {%- elif not (st_issue_net.stat.exists | default(false)) -%}
+              [U_62_2] Telnet 사용 환경이나 /etc/issue.net 파일이 없어 배너 반영 자동조치 불가(info) — 파일 경로 확인 필요
+              {%- else -%}
+              [U_62_2] /etc/issue.net에 Telnet 로그인 경고 메시지 반영(정책 문구 적용)
+              {%- endif %}
+            u622_status_val: >-
+              {% if has_telnet != 'YES' -%}
+              양호
+              {%- elif banner_ready != 'YES' -%}
+              info
+              {%- elif not (st_issue_net.stat.exists | default(false)) -%}
+              info
+              {%- elif (r_u622_issue_net.changed | default(false)) | bool -%}
+              취약
+              {%- else -%}
+              양호
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_2] LOG basis JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_622_b
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_622_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (u622_basis_msg | default("")),
+                      "status": (u622_status_val | default("info"))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+        # =========================================================
+        # U_62_3 : [SSH] Banner + file + restart
+        # =========================================================
+        - name: "U-62 | [U_62_3] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_623_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_3] LOG step (ssh detect) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_623_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_62_3] SSH 서비스/설정 대상 확인",
+                  "cmd": "stat sshd_config + detect ssh service name",
+                  "result": "sshd_config_exists=" ~ ((st_sshd_config.stat.exists | default(false)) | string)
+                            ~ ", ssh_service=" ~ (ssh_service_name | default("<none>"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_3] set Banner path in sshd_config"
+          ansible.builtin.lineinfile:
+            path: "{{ SSHD_CONFIG }}"
+            regexp: '^[[:space:]]*Banner[[:space:]]+'
+            line: "Banner {{ SSH_BANNER_TARGET }}"
+            create: no
+            backup: yes
+          register: r_u623_banner
+          when:
+            - st_sshd_config.stat.exists | default(false)
+            - (ssh_service_name | default('')) != ""
+            - banner_ready == "YES"
+    
+        - name: "U-62 | [U_62_3] ensure banner file content"
+          ansible.builtin.copy:
+            dest: "{{ SSH_BANNER_TARGET }}"
+            content: "{{ BANNER_TEXT }}\n"
+            owner: root
+            group: root
+            mode: "0644"
+          register: r_u623_bannerfile
+          when:
+            - (ssh_service_name | default('')) != ""
+            - banner_ready == "YES"
+    
+        - name: "U-62 | [U_62_3] restart ssh (when changed)"
+          ansible.builtin.systemd:
+            name: "{{ ssh_service_name }}"
+            state: restarted
+          register: r_u623_restart
+          failed_when: false
+          when:
+            - (ssh_service_name | default('')) != ""
+            - banner_ready == "YES"
+            - ((r_u623_banner.changed | default(false)) | bool) or ((r_u623_bannerfile.changed | default(false)) | bool)
+    
+        - name: "U-62 | [U_62_3] build basis/status safely"
+          ansible.builtin.set_fact:
+            u623_basis_msg: >-
+              {% if (ssh_service_name | default('') | trim) == '' -%}
+              [U_62_3] SSH 서비스 비대상(유닛 미존재) 또는 관리 제외로 배너 조치 불필요(양호)
+              {%- elif banner_ready != 'YES' -%}
+              [U_62_3] SSH 사용 환경이나 경고 문구(BANNER_TEXT) 미지정으로 자동조치 금지(info) — Banner 경로/파일 내용을 정책 문구로 확정 필요
+              {%- elif not (st_sshd_config.stat.exists | default(false)) -%}
+              [U_62_3] SSH 서비스는 있으나 sshd_config 파일이 없어 Banner 설정 자동조치 불가(info) — 설정 파일 경로 확인 필요
+              {%- else -%}
+              [U_62_3] sshd_config Banner 경로를 {{ SSH_BANNER_TARGET }}로 설정하고 배너 파일에 경고 문구 반영(설정 변경 시 재시작 시도)
+              {%- endif %}
+            u623_status_val: >-
+              {% if (ssh_service_name | default('') | trim) == '' -%}
+              양호
+              {%- elif banner_ready != 'YES' -%}
+              info
+              {%- elif not (st_sshd_config.stat.exists | default(false)) -%}
+              info
+              {%- elif ((r_u623_banner.changed | default(false)) | bool) or ((r_u623_bannerfile.changed | default(false)) | bool) -%}
+              취약
+              {%- else -%}
+              양호
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_3] LOG basis JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_623_b
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_623_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (u623_basis_msg | default("")),
+                      "status": (u623_status_val | default("info"))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+        # =========================================================
+        # U_62_4 : [Sendmail] (manual)
+        # =========================================================
+        - name: "U-62 | [U_62_4] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_624_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_4] LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_624_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (
+                    (has_sendmail != "YES")
+                    | ternary(
+                        "[U_62_4] Sendmail 비대상(미설치/미사용)으로 조치 불필요(양호)",
+                        "[U_62_4] Sendmail 사용 환경: SmtpGreetingMessage는 sendmail.cf 생성체계(.mc→.cf) 및 서비스 영향 검토가 필요하여 자동조치 금지(info) — 담당자 수동조치 필요"
+                      )
+                  ),
+                  "status": ((has_sendmail != "YES") | ternary("양호","info"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # U_62_5 : [Postfix] smtpd_banner
+        # =========================================================
+        - name: "U-62 | [U_62_5] set smtpd_banner (Postfix)"
+          ansible.builtin.lineinfile:
+            path: "/etc/postfix/main.cf"
+            regexp: '^[[:space:]]*smtpd_banner[[:space:]]*='
+            line: "smtpd_banner = {{ BANNER_TEXT | trim }}"
+            create: no
+            backup: yes
+          register: r_u625_postfix
+          when:
+            - has_postfix == "YES"
+            - banner_ready == "YES"
+            - st_postfix_main.stat.exists | default(false)
+    
+        - name: "U-62 | [U_62_5] restart postfix (when changed)"
+          ansible.builtin.systemd:
+            name: "postfix"
+            state: restarted
+          register: r_u625_restart
+          failed_when: false
+          when: (r_u625_postfix.changed | default(false)) | bool
+    
+        - name: "U-62 | [U_62_5] build basis/status safely"
+          ansible.builtin.set_fact:
+            u625_basis_msg: >-
+              {% if has_postfix != 'YES' -%}
+              [U_62_5] Postfix 비대상(미설치/미사용)으로 조치 불필요(양호)
+              {%- elif banner_ready != 'YES' -%}
+              [U_62_5] Postfix 사용 환경이나 경고 문구(BANNER_TEXT) 미지정으로 자동조치 금지(info)
+              {%- elif not (st_postfix_main.stat.exists | default(false)) -%}
+              [U_62_5] Postfix 사용 환경이나 /etc/postfix/main.cf 미존재로 smtpd_banner 자동조치 불가(info) — 설정 파일 경로 확인 필요
+              {%- else -%}
+              [U_62_5] main.cf에 smtpd_banner 설정 반영(변경 시 postfix 재시작 시도)
+              {%- endif %}
+            u625_status_val: >-
+              {% if has_postfix != 'YES' -%}
+              양호
+              {%- elif banner_ready != 'YES' -%}
+              info
+              {%- elif not (st_postfix_main.stat.exists | default(false)) -%}
+              info
+              {%- elif (r_u625_postfix.changed | default(false)) | bool -%}
+              취약
+              {%- else -%}
+              양호
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_5] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_625_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_5] LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_625_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u625_basis_msg | default("")),
+                  "status": (u625_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # U_62_6 : [Exim] smtp_banner  ★ 에러 재발 구간(중첩 ternary 제거)
+        # =========================================================
+        - name: "U-62 | [U_62_6] set smtp_banner (Exim)"
+          ansible.builtin.lineinfile:
+            path: "{{ exim_conf_path }}"
+            regexp: '^[[:space:]]*smtp_banner[[:space:]]*='
+            line: "smtp_banner = {{ BANNER_TEXT | trim }}"
+            create: no
+            backup: yes
+          register: r_u626_exim
+          when:
+            - has_exim == "YES"
+            - banner_ready == "YES"
+            - exim_conf_path != ""
+    
+        - name: "U-62 | [U_62_6] restart exim (when changed)"
+          ansible.builtin.systemd:
+            name: "exim"
+            state: restarted
+          register: r_u626_restart
+          failed_when: false
+          when: (r_u626_exim.changed | default(false)) | bool
+    
+        - name: "U-62 | [U_62_6] build basis/status safely"
+          ansible.builtin.set_fact:
+            u626_basis_msg: >-
+              {% if has_exim != 'YES' -%}
+              [U_62_6] Exim 비대상(미설치/미사용)으로 조치 불필요(양호)
+              {%- elif (exim_conf_path | default('') | trim) == '' -%}
+              [U_62_6] Exim 패키지는 탐지되나 설정파일 경로를 특정할 수 없어 자동조치 불가(info) — exim.conf 경로 확인 필요
+              {%- elif banner_ready != 'YES' -%}
+              [U_62_6] Exim 사용 환경이나 경고 문구(BANNER_TEXT) 미지정으로 자동조치 금지(info)
+              {%- else -%}
+              [U_62_6] Exim 설정파일에 smtp_banner 반영(변경 시 exim 재시작 시도)
+              {%- endif %}
+            u626_status_val: >-
+              {% if has_exim != 'YES' -%}
+              양호
+              {%- elif (exim_conf_path | default('') | trim) == '' -%}
+              info
+              {%- elif banner_ready != 'YES' -%}
+              info
+              {%- elif (r_u626_exim.changed | default(false)) | bool -%}
+              취약
+              {%- else -%}
+              양호
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_6] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_626_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_6] LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_626_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u626_basis_msg | default("")),
+                  "status": (u626_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # U_62_7 : [vsFTP] ftpd_banner (helper 방식으로 통일)
+        # =========================================================
+        - name: "U-62 | [U_62_7] set ftpd_banner (vsftpd)"
+          ansible.builtin.lineinfile:
+            path: "{{ vsftpd_conf_path }}"
+            regexp: '^[[:space:]]*ftpd_banner[[:space:]]*='
+            line: "ftpd_banner={{ BANNER_TEXT | trim }}"
+            create: no
+            backup: yes
+          register: r_u627_vsftpd
+          when:
+            - has_vsftpd == "YES"
+            - banner_ready == "YES"
+            - vsftpd_conf_path != ""
+    
+        - name: "U-62 | [U_62_7] restart vsftpd (when changed)"
+          ansible.builtin.systemd:
+            name: "vsftpd"
+            state: restarted
+          register: r_u627_restart
+          failed_when: false
+          when: (r_u627_vsftpd.changed | default(false)) | bool
+    
+        - name: "U-62 | [U_62_7] build basis/status safely"
+          ansible.builtin.set_fact:
+            u627_basis_msg: >-
+              {% if has_vsftpd != 'YES' -%}
+              [U_62_7] vsftpd 비대상(미설치/미사용)으로 조치 불필요(양호)
+              {%- elif (vsftpd_conf_path | default('') | trim) == '' -%}
+              [U_62_7] vsftpd 패키지는 탐지되나 설정파일(vsftpd.conf) 경로를 특정할 수 없어 자동조치 불가(info)
+              {%- elif banner_ready != 'YES' -%}
+              [U_62_7] vsftpd 사용 환경이나 경고 문구(BANNER_TEXT) 미지정으로 자동조치 금지(info)
+              {%- else -%}
+              [U_62_7] vsftpd.conf에 ftpd_banner 반영(변경 시 vsftpd 재시작 시도)
+              {%- endif %}
+            u627_status_val: >-
+              {% if has_vsftpd != 'YES' -%}
+              양호
+              {%- elif (vsftpd_conf_path | default('') | trim) == '' -%}
+              info
+              {%- elif banner_ready != 'YES' -%}
+              info
+              {%- elif (r_u627_vsftpd.changed | default(false)) | bool -%}
+              취약
+              {%- else -%}
+              양호
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_7] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_627_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_7] LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_627_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u627_basis_msg | default("")),
+                  "status": (u627_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # U_62_8 : [ProFTP] DisplayLogin welcome.msg (helper 방식)
+        # =========================================================
+        - name: "U-62 | [U_62_8] ensure welcome message file (when DisplayLogin path exists)"
+          ansible.builtin.copy:
+            dest: "{{ proftpd_welcome_path }}"
+            content: "{{ BANNER_TEXT }}\n"
+            owner: root
+            group: root
+            mode: "0644"
+          register: r_u628_welcome
+          when:
+            - has_proftpd == "YES"
+            - banner_ready == "YES"
+            - proftpd_conf_path != ""
+            - (proftpd_welcome_path | default('') | trim) != ""
+            - (proftpd_welcome_path | trim) != "none"
+    
+        - name: "U-62 | [U_62_8] restart proftpd (when changed)"
+          ansible.builtin.systemd:
+            name: "proftpd"
+            state: restarted
+          register: r_u628_restart
+          failed_when: false
+          when: (r_u628_welcome.changed | default(false)) | bool
+    
+        - name: "U-62 | [U_62_8] build basis/status safely"
+          ansible.builtin.set_fact:
+            u628_basis_msg: >-
+              {% if has_proftpd != 'YES' -%}
+              [U_62_8] ProFTPD 비대상(미설치/미사용)으로 조치 불필요(양호)
+              {%- elif (proftpd_conf_path | default('') | trim) == '' -%}
+              [U_62_8] ProFTPD 패키지는 탐지되나 설정파일 경로를 특정할 수 없어 자동조치 불가(info)
+              {%- elif ((proftpd_welcome_path | default('') | trim) == '' or (proftpd_welcome_path | trim) == 'none') -%}
+              [U_62_8] DisplayLogin(welcome.msg) 경로가 미설정/none: 서비스 정책 판단이 필요하여 자동조치 불가(info) — 담당자 설정 후 메시지 파일 반영 필요
+              {%- elif banner_ready != 'YES' -%}
+              [U_62_8] ProFTPD 사용 환경이나 경고 문구(BANNER_TEXT) 미지정으로 자동조치 금지(info)
+              {%- else -%}
+              [U_62_8] DisplayLogin에서 지정한 welcome 메시지 파일({{ proftpd_welcome_path | trim }})에 경고 문구 반영(변경 시 proftpd 재시작 시도)
+              {%- endif %}
+            u628_status_val: >-
+              {% if has_proftpd != 'YES' -%}
+              양호
+              {%- elif (proftpd_conf_path | default('') | trim) == '' -%}
+              info
+              {%- elif ((proftpd_welcome_path | default('') | trim) == '' or (proftpd_welcome_path | trim) == 'none') -%}
+              info
+              {%- elif banner_ready != 'YES' -%}
+              info
+              {%- elif (r_u628_welcome.changed | default(false)) | bool -%}
+              취약
+              {%- else -%}
+              양호
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_8] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_628_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_8] LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_628_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u628_basis_msg | default("")),
+                  "status": (u628_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # U_62_9 : [DNS] version conceal (helper 방식)
+        # =========================================================
+        - name: "U-62 | [U_62_9] set BIND version conceal"
+          ansible.builtin.lineinfile:
+            path: "{{ bind_conf_path }}"
+            regexp: '^[[:space:]]*version[[:space:]]+'
+            line: '        version "unknown";'
+            create: no
+            backup: yes
+          register: r_u629_bind
+          when:
+            - has_bind == "YES"
+            - bind_conf_path != ""
+    
+        - name: "U-62 | [U_62_9] restart named/bind9 (best-effort)"
+          ansible.builtin.shell: |
+            if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "named.service"; then
+              systemctl restart named || true
+            elif systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "bind9.service"; then
+              systemctl restart bind9 || true
+            else
+              true
+            fi
+          args:
+            executable: /bin/bash
+          register: r_u629_restart_raw
+          changed_when: false
+          failed_when: false
+          when: (r_u629_bind.changed | default(false)) | bool
+    
+        - name: "U-62 | [U_62_9] build basis/status safely"
+          ansible.builtin.set_fact:
+            u629_basis_msg: >-
+              {% if has_bind != 'YES' -%}
+              [U_62_9] DNS(BIND) 비대상(미설치/미사용)으로 조치 불필요(양호)
+              {%- elif (bind_conf_path | default('') | trim) == '' -%}
+              [U_62_9] BIND 패키지는 탐지되나 설정파일(named.conf 등) 경로를 특정할 수 없어 자동조치 불가(info)
+              {%- else -%}
+              [U_62_9] BIND version 정보(version "unknown";) 은폐 설정 반영(변경 시 서비스 재시작 시도)
+              {%- endif %}
+            u629_status_val: >-
+              {% if has_bind != 'YES' -%}
+              양호
+              {%- elif (bind_conf_path | default('') | trim) == '' -%}
+              info
+              {%- elif (r_u629_bind.changed | default(false)) | bool -%}
+              취약
+              {%- else -%}
+              양호
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-62 | [U_62_9] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_629_a
+          changed_when: false
+    
+        - name: "U-62 | [U_62_9] LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_629_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u629_basis_msg | default("")),
+                  "status": (u629_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false

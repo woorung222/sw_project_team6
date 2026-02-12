@@ -1,0 +1,291 @@
+    ---
+    - name: "U-64 | Patch Policy: Security Updates & Kernel Reboot (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-64"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-64 | init defaults"
+          ansible.builtin.set_fact:
+            os_family: "UNKNOWN"    # REDHAT/DEBIAN/UNKNOWN
+    
+            # flags (1=취약 원인 성립, 0=미성립)
+            U_64_1: 0               # 보안 업데이트 대기(미적용)
+            U_64_2: 0               # 최신 커널 설치 후 재부팅 미실행(커널 불일치/재부팅 필요)
+    
+            # 측정값
+            security_updates_cnt: 0
+            dnf_check_rc: -1
+            current_kernel: ""
+            latest_kernel: ""
+            reboot_required: "NO"
+    
+            # step cmd/result helper (템플릿 오류 방지)
+            u64_step_cmd: ""
+            u64_step_result: ""
+    
+            # basis helper
+            u64_basis_msg: ""
+            u64_status_val: ""
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # OS family 감지
+        # ---------------------------------------------------------
+        - name: "U-64 | detect OS family"
+          ansible.builtin.shell: |
+            if [ -f /etc/redhat-release ]; then
+              echo "REDHAT"
+            elif [ -f /etc/debian_version ]; then
+              echo "DEBIAN"
+            else
+              echo "UNKNOWN"
+            fi
+          args:
+            executable: /bin/bash
+          register: r_os
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-64 | set os_family"
+          ansible.builtin.set_fact:
+            os_family: "{{ r_os.stdout | default('UNKNOWN') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # 공통: 현재 커널 버전
+        # ---------------------------------------------------------
+        - name: "U-64 | get current kernel"
+          ansible.builtin.command: "uname -r"
+          register: r_cur_kernel
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-64 | set current_kernel"
+          ansible.builtin.set_fact:
+            current_kernel: "{{ r_cur_kernel.stdout | default('') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # [DEBIAN/Ubuntu] U_64_1, U_64_2
+        # ---------------------------------------------------------
+        - name: "U-64 | (DEBIAN) count security updates via apt-get -s dist-upgrade"
+          ansible.builtin.shell: |
+            set -o pipefail
+            apt-get -s dist-upgrade 2>/dev/null \
+              | grep -i "^Inst" \
+              | grep -i "security" \
+              | wc -l
+          args:
+            executable: /bin/bash
+          register: r_apt_sec_cnt
+          changed_when: false
+          failed_when: false
+          when: os_family == "DEBIAN"
+    
+        - name: "U-64 | (DEBIAN) detect latest installed kernel package name"
+          ansible.builtin.shell: |
+            set -o pipefail
+            dpkg -l 2>/dev/null \
+              | grep "linux-image-[0-9]" \
+              | grep "^ii" \
+              | awk '{print $2}' \
+              | sort -V \
+              | tail -n 1
+          args:
+            executable: /bin/bash
+          register: r_deb_latest_kernel
+          changed_when: false
+          failed_when: false
+          when: os_family == "DEBIAN"
+    
+        - name: "U-64 | (DEBIAN) check reboot-required"
+          ansible.builtin.shell: |
+            if [ -f /var/run/reboot-required ]; then
+              echo "YES"
+            else
+              echo "NO"
+            fi
+          args:
+            executable: /bin/bash
+          register: r_reboot_required
+          changed_when: false
+          failed_when: false
+          when: os_family == "DEBIAN"
+    
+        - name: "U-64 | (DEBIAN) set metrics & flags"
+          ansible.builtin.set_fact:
+            security_updates_cnt: "{{ (r_apt_sec_cnt.stdout | default('0') | int) }}"
+            latest_kernel: "{{ r_deb_latest_kernel.stdout | default('') }}"
+            reboot_required: "{{ r_reboot_required.stdout | default('NO') }}"
+            U_64_1: "{{ ((r_apt_sec_cnt.stdout | default('0') | int) > 0) | ternary(1,0) }}"
+            U_64_2: >-
+              {{
+                (
+                  ((r_reboot_required.stdout | default('NO')) == 'YES')
+                  or
+                  (
+                    (r_deb_latest_kernel.stdout | default('') | trim) != '' and
+                    (current_kernel | default('') | trim) != '' and
+                    ((r_deb_latest_kernel.stdout | default('')) is not search(current_kernel | default('')))
+                  )
+                ) | ternary(1,0)
+              }}
+          changed_when: false
+          when: os_family == "DEBIAN"
+    
+        # ---------------------------------------------------------
+        # [REDHAT/Rocky] U_64_1, U_64_2
+        # ---------------------------------------------------------
+        - name: "U-64 | (REDHAT) dnf check-update --security (rc=100 means updates available)"
+          ansible.builtin.shell: |
+            dnf check-update --security -q >/dev/null 2>&1
+            echo $?
+          args:
+            executable: /bin/bash
+          register: r_dnf_rc
+          changed_when: false
+          failed_when: false
+          when: os_family == "REDHAT"
+    
+        - name: "U-64 | (REDHAT) detect latest installed kernel version"
+          ansible.builtin.shell: |
+            set -o pipefail
+            rpm -q kernel --qf "%{VERSION}-%{RELEASE}.%{ARCH}\n" 2>/dev/null | sort -V | tail -n 1
+          args:
+            executable: /bin/bash
+          register: r_rpm_latest_kernel
+          changed_when: false
+          failed_when: false
+          when: os_family == "REDHAT"
+    
+        - name: "U-64 | (REDHAT) set metrics & flags"
+          ansible.builtin.set_fact:
+            dnf_check_rc: "{{ (r_dnf_rc.stdout | default('-1') | int) }}"
+            security_updates_cnt: "{{ ((r_dnf_rc.stdout | default('-1') | int) == 100) | ternary(1,0) }}"
+            latest_kernel: "{{ r_rpm_latest_kernel.stdout | default('') }}"
+            reboot_required: "UNKNOWN"
+            U_64_1: "{{ ((r_dnf_rc.stdout | default('-1') | int) == 100) | ternary(1,0) }}"
+            U_64_2: >-
+              {{
+                (
+                  (r_rpm_latest_kernel.stdout | default('') | trim) != '' and
+                  (current_kernel | default('') | trim) != '' and
+                  (current_kernel | trim) != (r_rpm_latest_kernel.stdout | trim)
+                ) | ternary(1,0)
+              }}
+          changed_when: false
+          when: os_family == "REDHAT"
+    
+        # ---------------------------------------------------------
+        # UNKNOWN OS
+        # ---------------------------------------------------------
+        - name: "U-64 | (UNKNOWN) keep defaults"
+          ansible.builtin.set_fact:
+            U_64_1: 0
+            U_64_2: 0
+            reboot_required: "UNKNOWN"
+          changed_when: false
+          when: os_family == "UNKNOWN"
+    
+        # ---------------------------------------------------------
+        # (템플릿 안전) step cmd/result 문자열을 먼저 확정
+        # ---------------------------------------------------------
+        - name: "U-64 | build step cmd/result safely"
+          ansible.builtin.set_fact:
+            u64_step_cmd: >-
+              {% if os_family == 'DEBIAN' -%}
+              apt-get -s dist-upgrade | grep Inst | grep security ; dpkg -l linux-image-* ; /var/run/reboot-required
+              {%- elif os_family == 'REDHAT' -%}
+              dnf check-update --security ; rpm -q kernel ; uname -r
+              {%- else -%}
+              OS family unknown
+              {%- endif %}
+            u64_step_result: >-
+              os_family={{ os_family }},
+              U_64_1={{ U_64_1 }},
+              U_64_2={{ U_64_2 }},
+              security_updates_cnt={{ security_updates_cnt }},
+              dnf_check_rc={{ dnf_check_rc }},
+              current_kernel={{ current_kernel }},
+              latest_kernel={{ latest_kernel }},
+              reboot_required={{ reboot_required }}
+          changed_when: false
+    
+        # =========================================================
+        # LOG step: 측정값/판정 근거
+        # =========================================================
+        - name: "U-64 | ts (step summary)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_641
+          changed_when: false
+    
+        - name: "U-64 | LOG step JSONL (summary)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_641.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_64_1/U_64_2] 보안 업데이트/커널 재부팅 필요 여부 점검",
+                  "cmd": (u64_step_cmd | default("")),
+                  "result": (u64_step_result | default(""))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # LOG basis: 자동조치 정책(수동조치 필요) + 상태 산출
+        # =========================================================
+        - name: "U-64 | build basis/status safely"
+          ansible.builtin.set_fact:
+            u64_basis_msg: >-
+              {% if os_family == 'UNKNOWN' -%}
+              [U_64] OS 식별 불가로 패치 정책 점검 근거를 확보할 수 없어 자동조치 불가(info) — OS/벤더 확인 필요
+              {%- elif (U_64_1 | int) == 0 and (U_64_2 | int) == 0 -%}
+              [U_64] 보안 업데이트 대기 없음 및 커널 불일치/재부팅 필요 징후 없음(조치 불필요)
+              {%- else -%}
+              [U_64] 보안 패치 정책 위반 징후 탐지(U_64_1 또는 U_64_2). 패치 적용 및 커널 업데이트/재부팅은 서비스 영향·승인 필요로 자동조치 금지(info) — 담당자 수동조치 필요
+              {%- endif %}
+            u64_status_val: >-
+              {% if os_family == 'UNKNOWN' -%}
+              info
+              {%- elif (U_64_1 | int) == 0 and (U_64_2 | int) == 0 -%}
+              양호
+              {%- else -%}
+              info
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-64 | ts (basis)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_64b
+          changed_when: false
+    
+        - name: "U-64 | LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_64b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u64_basis_msg | default("")),
+                  "status": (u64_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false

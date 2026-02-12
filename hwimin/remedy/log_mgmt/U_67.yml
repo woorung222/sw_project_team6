@@ -1,0 +1,304 @@
+    ---
+    - name: "U-67 | Remediate Log Files Owner/Permission in /var/log (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-67"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+        # ===== 조치 값(고정) =====
+        AUTO_OWNER: "root"
+        AUTO_GROUP: "root"
+        AUTO_MODE: "0644"
+    
+        LOG_DIR: "/var/log"
+    
+        # Rocky/RHEL 계열 주요 로그(업로드 스크립트 기준)
+        ROCKY_LOG_FILES:
+          - "/var/log/messages"
+          - "/var/log/secure"
+          - "/var/log/maillog"
+          - "/var/log/cron"
+          - "/var/log/boot.log"
+          - "/var/log/dmesg"
+          - "/var/log/syslog"
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-67 | init defaults"
+          ansible.builtin.set_fact:
+            os_family: "UNKNOWN"     # REDHAT/DEBIAN/UNKNOWN
+            logdir_exists: false
+    
+            offenders: []            # 취약 파일 목록(사전 점검 결과)
+            offenders_cnt: 0
+            U_67_1: 0                # flag (1=취약 원인 성립)
+    
+            # remediation
+            r_u671: []               # loop 결과용
+            any_changed: false
+    
+            # safe strings for logs
+            u67_step_cmd_1: ""
+            u67_step_res_1: ""
+            u67_step_cmd_2: ""
+            u67_step_res_2: ""
+            u67_basis_msg: ""
+            u67_status_val: "info"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # OS family 감지
+        # ---------------------------------------------------------
+        - name: "U-67 | detect OS family"
+          ansible.builtin.shell: |
+            if [ -f /etc/redhat-release ]; then
+              echo "REDHAT"
+            elif [ -f /etc/debian_version ]; then
+              echo "DEBIAN"
+            else
+              echo "UNKNOWN"
+            fi
+          args:
+            executable: /bin/bash
+          register: r_os
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-67 | set os_family"
+          ansible.builtin.set_fact:
+            os_family: "{{ r_os.stdout | default('UNKNOWN') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # /var/log 존재 확인
+        # ---------------------------------------------------------
+        - name: "U-67 | stat /var/log"
+          ansible.builtin.stat:
+            path: "{{ LOG_DIR }}"
+          register: st_logdir
+          changed_when: false
+    
+        - name: "U-67 | set logdir_exists"
+          ansible.builtin.set_fact:
+            logdir_exists: "{{ st_logdir.stat.isdir | default(false) }}"
+          changed_when: false
+    
+        # =========================================================
+        # Step: 탐지(취약 파일 목록 생성)
+        # - REDHAT: 주요 로그 파일 리스트 기반(스크립트 동일 의미)
+        # - DEBIAN: /var/log 전수(find -type f, -not -user root OR -perm /022)
+        # =========================================================
+        - name: "U-67 | detect offenders (REDHAT: fixed list)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            for f in {{ ROCKY_LOG_FILES | join(' ') }}; do
+              if [ -f "$f" ]; then
+                owner="$(stat -c '%U' "$f" 2>/dev/null || echo '')"
+                perm="$(stat -c '%a' "$f" 2>/dev/null || echo '0')"
+                if [ "$owner" != "root" ] || [ "$perm" -gt 644 ]; then
+                  echo "$f"
+                fi
+              fi
+            done
+          args:
+            executable: /bin/bash
+          register: r_off_redhat
+          changed_when: false
+          failed_when: false
+          when:
+            - logdir_exists
+            - os_family == "REDHAT"
+    
+        - name: "U-67 | detect offenders (DEBIAN: full scan)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            find "{{ LOG_DIR }}" -type f \( -not -user root -o -perm /022 \) -print 2>/dev/null || true
+          args:
+            executable: /bin/bash
+          register: r_off_debian
+          changed_when: false
+          failed_when: false
+          when:
+            - logdir_exists
+            - os_family == "DEBIAN"
+    
+        - name: "U-67 | set offenders list"
+          ansible.builtin.set_fact:
+            offenders: >-
+              {{
+                (
+                  (os_family == 'REDHAT')
+                  | ternary((r_off_redhat.stdout_lines | default([])), (r_off_debian.stdout_lines | default([])))
+                )
+                if logdir_exists else
+                []
+              }}
+          changed_when: false
+    
+        - name: "U-67 | set flags"
+          ansible.builtin.set_fact:
+            offenders_cnt: "{{ offenders | length }}"
+            U_67_1: "{{ ((offenders | length) > 0) | ternary(1,0) }}"
+          changed_when: false
+    
+        - name: "U-67 | ts (detect)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_671_a
+          changed_when: false
+    
+        - name: "U-67 | build step1 cmd/result safely"
+          ansible.builtin.set_fact:
+            u67_step_cmd_1: >-
+              {% if os_family == 'REDHAT' -%}
+              stat -c '%U %a' for fixed list (messages/secure/maillog/cron/boot.log/dmesg/syslog)
+              {%- elif os_family == 'DEBIAN' -%}
+              find /var/log -type f (-not -user root OR -perm /022)
+              {%- else -%}
+              OS family unknown
+              {%- endif %}
+            u67_step_res_1: >-
+              os_family={{ os_family }},
+              logdir_exists={{ logdir_exists }},
+              offenders_cnt={{ offenders_cnt }},
+              U_67_1={{ U_67_1 }}
+          changed_when: false
+    
+        - name: "U-67 | LOG step JSONL (detect summary)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_671_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_67_1] /var/log 로그 파일 소유자(root)/권한(<=644) 위반 탐지",
+                  "cmd": (u67_step_cmd_1 | default("")),
+                  "result": (u67_step_res_1 | default(""))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # Remediate: offenders를 root:root 0644로 강제
+        # =========================================================
+        - name: "U-67 | enforce owner/mode for offenders"
+          ansible.builtin.file:
+            path: "{{ item }}"
+            owner: "{{ AUTO_OWNER }}"
+            group: "{{ AUTO_GROUP }}"
+            mode: "{{ AUTO_MODE }}"
+          loop: "{{ offenders }}"
+          register: r_u671
+          when:
+            - logdir_exists
+            - (offenders_cnt | int) > 0
+    
+        - name: "U-67 | set any_changed"
+          ansible.builtin.set_fact:
+            any_changed: "{{ (r_u671.results | default([]) | selectattr('changed','equalto',true) | list | length) > 0 }}"
+          changed_when: false
+          when:
+            - logdir_exists
+            - (offenders_cnt | int) > 0
+    
+        - name: "U-67 | ts (remediation)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_671_b
+          changed_when: false
+    
+        - name: "U-67 | build step2 cmd/result safely"
+          ansible.builtin.set_fact:
+            u67_step_cmd_2: "file: owner=root group=root mode=0644 @ offenders(in /var/log)"
+            u67_step_res_2: >-
+              offenders_cnt={{ offenders_cnt }},
+              changed={{ any_changed }}
+          changed_when: false
+    
+        - name: "U-67 | LOG step JSONL (remediation summary)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_671_b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_67_1] 위반 로그 파일 소유자/권한(root:root,0644) 조치",
+                  "cmd": (u67_step_cmd_2 | default("")),
+                  "result": (u67_step_res_2 | default(""))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # LOG basis: 최종 근거/상태
+        # - /var/log 없음: info
+        # - 위반 없음: 양호
+        # - 위반 있었음: 취약(조치 수행/필요 상태였음)
+        # =========================================================
+        - name: "U-67 | build basis/status safely"
+          ansible.builtin.set_fact:
+            u67_basis_msg: >-
+              {% if not logdir_exists -%}
+              [U_67_1] /var/log 디렉터리 미존재로 점검/조치 대상이 없어 자동조치 불가(info) — 배포 표준/경로 확인 필요
+              {%- elif (offenders_cnt | int) == 0 -%}
+              [U_67_1] /var/log 내 로그 파일 소유자(root) 및 권한(<=644) 기준 충족(조치 불필요)
+              {%- else -%}
+              [U_67_1] /var/log 내 로그 파일 중 소유자 root 아님 또는 권한이 644 초과(그룹/타인 쓰기 가능) 항목이 있어 root:root,0644로 변경 적용(조치 수행)
+              {%- endif %}
+            u67_status_val: >-
+              {% if not logdir_exists -%}
+              info
+              {%- elif (offenders_cnt | int) == 0 -%}
+              양호
+              {%- else -%}
+              취약
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-67 | ts (basis)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_67b
+          changed_when: false
+    
+        - name: "U-67 | LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_67b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u67_basis_msg | default("")),
+                  "status": (u67_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # (팀 조건) 조치 블록 종료 msg 로그
+        # ---------------------------------------------------------
+        - name: "U-67 | end msg"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_67b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U-67] 조치 종료",
+                  "cmd": "end",
+                  "result": "done"
+                } | to_json
+              }}
+          changed_when: false

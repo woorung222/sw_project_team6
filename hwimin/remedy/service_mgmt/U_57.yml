@@ -1,0 +1,937 @@
+    ---
+    - name: "U-57 | Remediate FTP Root Access Restriction (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-57"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+        # ===== 조치 값(고정) =====
+        BLOCK_USER: "root"
+    
+        # vsftpd / proftpd 후보 경로
+        VSFTPD_CONF_CANDIDATES:
+          - "/etc/vsftpd/vsftpd.conf"
+          - "/etc/vsftpd.conf"
+    
+        VSFTPD_FTPUSERS_CANDIDATES:
+          - "/etc/vsftpd.ftpusers"
+          - "/etc/vsftpd/ftpusers"
+    
+        VSFTPD_USERLIST_CANDIDATES:
+          - "/etc/vsftpd.user_list"
+          - "/etc/vsftpd/user_list"
+    
+        PROFTPD_CONF_CANDIDATES:
+          - "/etc/proftpd.conf"
+          - "/etc/proftpd/proftpd.conf"
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-57 | init defaults"
+          ansible.builtin.set_fact:
+            # common ftpusers (/etc/ftpusers or /etc/ftpd/ftpusers)
+            st_common_ftpusers: {}
+            common_ftpusers_path: ""
+            r_u571: {}
+    
+            # vsftpd
+            st_vs_conf: {}
+            vsftpd_conf_path: ""
+            vsftpd_userlist_enable: "NO"   # default NO
+            vsftpd_userlist_deny: "YES"    # default YES
+            st_vs_ftpusers: {}
+            st_vs_userlist: {}
+            vsftpd_ftpusers_path: ""
+            vsftpd_userlist_path: ""
+            r_u572: {}
+            r_u573: {}
+    
+            # proftpd ftpusers
+            st_pro_ftpusers: {}
+            r_u574: {}
+    
+            # proftpd RootLogin off
+            st_pro_conf: {}
+            proftpd_conf_path: ""
+            proftpd_useftpusers: "ON"      # default ON
+            r_u575: {}
+            r_proftpd_restart: {}
+          changed_when: false
+    
+        # =========================================================
+        # U_57_1 : 기본 FTP-ftpusers (/etc/ftpusers or /etc/ftpd/ftpusers) 에 root 차단
+        # - 파일 존재 시: root 라인 ensure
+        # - 파일 미존재 시: info (서비스 미사용/미설치 가능)
+        # =========================================================
+        - name: "U-57 | [U_57_1] stat common ftpusers candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/ftpusers"
+            - "/etc/ftpd/ftpusers"
+          register: st_common_candidates
+          changed_when: false
+    
+        - name: "U-57 | [U_57_1] pick common_ftpusers_path"
+          ansible.builtin.set_fact:
+            common_ftpusers_path: >-
+              {{
+                (st_common_candidates.results
+                  | selectattr('stat.exists','equalto',true)
+                  | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        - name: "U-57 | [U_57_1] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_571_a
+          changed_when: false
+    
+        - name: "U-57 | [U_57_1] LOG step (common ftpusers existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_571_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_57_1] 기본 ftpusers 파일 존재 여부",
+                  "cmd": "[ -f /etc/ftpusers ] || [ -f /etc/ftpd/ftpusers ]",
+                  "result": (common_ftpusers_path != "") | ternary("파일 존재: " ~ common_ftpusers_path, "파일 없음")
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-57 | [U_57_1] ensure root in common ftpusers"
+          ansible.builtin.lineinfile:
+            path: "{{ common_ftpusers_path }}"
+            line: "{{ BLOCK_USER }}"
+            regexp: '^[[:space:]]*root[[:space:]]*$'
+            state: present
+            create: no
+            backup: yes
+          register: r_u571
+          when: common_ftpusers_path != ""
+    
+        - name: "U-57 | [U_57_1] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_571_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_571_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_1] 기본 ftpusers에 root 차단 라인 적용",
+                      "cmd": "lineinfile: add 'root' @ " ~ common_ftpusers_path,
+                      "result": "changed=" ~ (((r_u571.changed|default(false))|bool)|string)
+                                ~ ", backup_file=" ~ (r_u571.backup_file | default("<none>"))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_571_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_1] 기본 ftpusers(root 차단 목록)에서 root 계정 차단 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u571.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when: common_ftpusers_path != ""
+    
+        - name: "U-57 | [U_57_1] LOG basis (missing → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_571_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_571_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_1] 기본 ftpusers 파일 미존재: FTP 데몬/서비스 미사용·미설치 또는 배포 표준 경로 비대상 가능 — 조치 타겟 부재로 자동조치 불가(info) — 담당자 확인 필요",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when: common_ftpusers_path == ""
+    
+        - name: "U-57 | [U_57_1] summary LOG(JSONL)"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_571_s
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_571_s.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_1] summary",
+                      "cmd": "common ftpusers: detect + ensure 'root'",
+                      "result": "path=" ~ (common_ftpusers_path | default("<none>"))
+                                ~ ", changed=" ~ ((((r_u571.changed|default(false))|bool)|string))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+        # =========================================================
+        # vsftpd 공통: 설정 파일/옵션 읽기(userlist_enable, userlist_deny)
+        # =========================================================
+        - name: "U-57 | stat vsftpd conf candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: "{{ VSFTPD_CONF_CANDIDATES }}"
+          register: st_vs_conf
+          changed_when: false
+    
+        - name: "U-57 | pick vsftpd_conf_path"
+          ansible.builtin.set_fact:
+            vsftpd_conf_path: >-
+              {{
+                (st_vs_conf.results | selectattr('stat.exists','equalto',true)
+                  | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        - name: "U-57 | read vsftpd userlist_enable/userlist_deny (defaults: NO/YES)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            CONF="{{ vsftpd_conf_path }}"
+            if [ -z "$CONF" ] || [ ! -f "$CONF" ]; then
+              echo "NO YES"; exit 0
+            fi
+    
+            enable=$(grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null \
+              | grep -E "^[[:space:]]*userlist_enable[[:space:]]*=" \
+              | tail -n 1 | awk -F= '{print $2}' | tr -d ' \t\r' | tr 'a-z' 'A-Z')
+            [ -z "$enable" ] && enable="NO"
+    
+            deny=$(grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null \
+              | grep -E "^[[:space:]]*userlist_deny[[:space:]]*=" \
+              | tail -n 1 | awk -F= '{print $2}' | tr -d ' \t\r' | tr 'a-z' 'A-Z')
+            [ -z "$deny" ] && deny="YES"
+    
+            echo "$enable $deny"
+          args:
+            executable: /bin/bash
+          register: r_vs_opts
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-57 | set vsftpd options"
+          ansible.builtin.set_fact:
+            vsftpd_userlist_enable: "{{ (r_vs_opts.stdout.split(' ') | first | default('NO')) }}"
+            vsftpd_userlist_deny: "{{ (r_vs_opts.stdout.split(' ') | last  | default('YES')) }}"
+          changed_when: false
+    
+        - name: "U-57 | ts (vsftpd options)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_vs_1
+          changed_when: false
+    
+        - name: "U-57 | LOG step JSONL (vsftpd options)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_vs_1.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_57_2/U_57_3] vsftpd userlist_enable/userlist_deny 확인",
+                  "cmd": "grep userlist_enable/userlist_deny @ " ~ (vsftpd_conf_path | default("<none>")),
+                  "result": "userlist_enable=" ~ (vsftpd_userlist_enable | default("NO"))
+                            ~ ", userlist_deny=" ~ (vsftpd_userlist_deny | default("YES"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-57 | stat vsftpd ftpusers candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: "{{ VSFTPD_FTPUSERS_CANDIDATES }}"
+          register: st_vs_ftpusers
+          changed_when: false
+    
+        - name: "U-57 | stat vsftpd user_list candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: "{{ VSFTPD_USERLIST_CANDIDATES }}"
+          register: st_vs_userlist
+          changed_when: false
+    
+        - name: "U-57 | pick vsftpd_ftpusers_path / vsftpd_userlist_path"
+          ansible.builtin.set_fact:
+            vsftpd_ftpusers_path: >-
+              {{
+                (st_vs_ftpusers.results | selectattr('stat.exists','equalto',true)
+                  | map(attribute='item') | list | first) | default("")
+              }}
+            vsftpd_userlist_path: >-
+              {{
+                (st_vs_userlist.results | selectattr('stat.exists','equalto',true)
+                  | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # U_57_2 : vsftpd - ftpusers (userlist_enable!=YES 환경에서 root 차단)
+        # =========================================================
+        - name: "U-57 | [U_57_2] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_572_a
+          changed_when: false
+          when: (vsftpd_userlist_enable | default("NO")) != "YES"
+    
+        - name: "U-57 | [U_57_2] LOG step (ftpusers existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_572_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_57_2] vsftpd ftpusers 파일 존재 여부(userlist_enable!=YES)",
+                  "cmd": "[ -f /etc/vsftpd/ftpusers ] (or /etc/vsftpd.ftpusers)",
+                  "result": (vsftpd_ftpusers_path != "") | ternary("파일 존재: " ~ vsftpd_ftpusers_path, "파일 없음")
+                } | to_json
+              }}
+          changed_when: false
+          when: (vsftpd_userlist_enable | default("NO")) != "YES"
+    
+        - name: "U-57 | [U_57_2] ensure root in vsftpd ftpusers"
+          ansible.builtin.lineinfile:
+            path: "{{ vsftpd_ftpusers_path }}"
+            line: "{{ BLOCK_USER }}"
+            regexp: '^[[:space:]]*root[[:space:]]*$'
+            state: present
+            create: no
+            backup: yes
+          register: r_u572
+          when:
+            - (vsftpd_userlist_enable | default("NO")) != "YES"
+            - vsftpd_ftpusers_path != ""
+    
+        - name: "U-57 | [U_57_2] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_572_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_572_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_2] vsftpd ftpusers에 root 차단 라인 적용",
+                      "cmd": "lineinfile: add 'root' @ " ~ vsftpd_ftpusers_path,
+                      "result": "changed=" ~ (((r_u572.changed|default(false))|bool)|string)
+                                ~ ", backup_file=" ~ (r_u572.backup_file | default("<none>"))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_572_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_2] userlist_enable!=YES 환경: vsftpd ftpusers(root 차단 목록)에서 root 계정 차단 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u572.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) != "YES"
+            - vsftpd_ftpusers_path != ""
+    
+        - name: "U-57 | [U_57_2] LOG basis (auto not possible → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_572_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_572_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (
+                        (vsftpd_conf_path | default("") == "")
+                        | ternary(
+                            "[U_57_2] vsftpd 설정파일 미존재(후보 경로 모두 없음)로 서비스 미설치/미사용 가능 — 조치대상(vsftpd ftpusers) 특정 불가(info) — 담당자 확인 필요",
+                            "[U_57_2] userlist_enable!=YES 인데 vsftpd ftpusers 파일 경로가 확인되지 않아 자동조치 불가(info) — 담당자 확인 필요"
+                          )
+                      ),
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) != "YES"
+            - vsftpd_ftpusers_path == ""
+    
+        - name: "U-57 | [U_57_2] summary LOG(JSONL)"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_572_s
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_572_s.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_2] summary",
+                      "cmd": "vsftpd ftpusers: when userlist_enable!=YES, ensure 'root'",
+                      "result": "userlist_enable=" ~ (vsftpd_userlist_enable | default("NO"))
+                                ~ ", path=" ~ (vsftpd_ftpusers_path | default("<none>"))
+                                ~ ", changed=" ~ ((((r_u572.changed|default(false))|bool)|string))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+        # =========================================================
+        # U_57_3 : vsftpd - user_list (userlist_enable=YES AND userlist_deny=YES 일 때 root 차단)
+        # - userlist_deny=NO이면 user_list는 allow-list 성격이므로 자동조치 금지(info)
+        # =========================================================
+        - name: "U-57 | [U_57_3] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_573_a
+          changed_when: false
+          when: (vsftpd_userlist_enable | default("NO")) == "YES"
+    
+        - name: "U-57 | [U_57_3] LOG step (user_list existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_573_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_57_3] vsftpd user_list 파일 존재 여부(userlist_enable=YES)",
+                  "cmd": "[ -f /etc/vsftpd/user_list ] (or /etc/vsftpd.user_list)",
+                  "result": (vsftpd_userlist_path != "") | ternary("파일 존재: " ~ vsftpd_userlist_path, "파일 없음")
+                } | to_json
+              }}
+          changed_when: false
+          when: (vsftpd_userlist_enable | default("NO")) == "YES"
+    
+        - name: "U-57 | [U_57_3] ensure root in vsftpd user_list (deny-mode only)"
+          ansible.builtin.lineinfile:
+            path: "{{ vsftpd_userlist_path }}"
+            line: "{{ BLOCK_USER }}"
+            regexp: '^[[:space:]]*root[[:space:]]*$'
+            state: present
+            create: no
+            backup: yes
+          register: r_u573
+          when:
+            - (vsftpd_userlist_enable | default("NO")) == "YES"
+            - (vsftpd_userlist_deny | default("YES")) == "YES"
+            - vsftpd_userlist_path != ""
+    
+        - name: "U-57 | [U_57_3] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_573_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_573_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_3] vsftpd user_list에 root 차단 라인 적용(userlist_deny=YES)",
+                      "cmd": "lineinfile: add 'root' @ " ~ vsftpd_userlist_path,
+                      "result": "changed=" ~ (((r_u573.changed|default(false))|bool)|string)
+                                ~ ", backup_file=" ~ (r_u573.backup_file | default("<none>"))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_573_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_3] userlist_enable=YES & userlist_deny=YES 환경: user_list(차단 목록)에서 root 계정 차단 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u573.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) == "YES"
+            - (vsftpd_userlist_deny | default("YES")) == "YES"
+            - vsftpd_userlist_path != ""
+    
+        - name: "U-57 | [U_57_3] LOG basis (userlist_deny=NO → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_573_no
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_573_no.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_3] userlist_enable=YES 이지만 userlist_deny=NO(허용 목록 모드)로 판단: user_list에 root 추가는 보안/정책 영향이 있어 자동조치 금지(info) — 담당자 정책 확인 필요",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) == "YES"
+            - (vsftpd_userlist_deny | default("YES")) == "NO"
+    
+        - name: "U-57 | [U_57_3] LOG basis (auto not possible → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_573_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_573_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (
+                        (vsftpd_conf_path | default("") == "")
+                        | ternary(
+                            "[U_57_3] vsftpd 설정파일 미존재로 userlist_enable/userlist_deny 판단 불가 — user_list 기반 차단 적용 여부를 특정할 수 없어 자동조치 불가(info) — 담당자 확인 필요",
+                            "[U_57_3] userlist_enable=YES 인데 user_list 파일 경로가 확인되지 않아 자동조치 불가(info) — 담당자 확인 필요"
+                          )
+                      ),
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) == "YES"
+            - (vsftpd_userlist_deny | default("YES")) == "YES"
+            - vsftpd_userlist_path == ""
+    
+        - name: "U-57 | [U_57_3] summary LOG(JSONL)"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_573_s
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_573_s.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_3] summary",
+                      "cmd": "vsftpd user_list: when enable=YES & deny=YES, ensure 'root'",
+                      "result": "enable=" ~ (vsftpd_userlist_enable | default("NO"))
+                                ~ ", deny=" ~ (vsftpd_userlist_deny | default("YES"))
+                                ~ ", path=" ~ (vsftpd_userlist_path | default("<none>"))
+                                ~ ", changed=" ~ ((((r_u573.changed|default(false))|bool)|string))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+        # =========================================================
+        # U_57_4 : ProFTP - ftpusers (/etc/ftpd/ftpusers) 에 root 차단
+        # - 파일 존재 시: root 라인 ensure
+        # - 파일 미존재 시: info (ProFTP 미사용 가능)
+        # =========================================================
+        - name: "U-57 | [U_57_4] stat /etc/ftpd/ftpusers"
+          ansible.builtin.stat:
+            path: "/etc/ftpd/ftpusers"
+          register: st_pro_ftpusers
+          changed_when: false
+    
+        - name: "U-57 | [U_57_4] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_574_a
+          changed_when: false
+    
+        - name: "U-57 | [U_57_4] LOG step (existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_574_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_57_4] ProFTP ftpusers(/etc/ftpd/ftpusers) 파일 존재 여부",
+                  "cmd": "[ -f /etc/ftpd/ftpusers ]",
+                  "result": (st_pro_ftpusers.stat.exists | default(false)) | ternary("파일 존재","파일 없음")
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-57 | [U_57_4] ensure root in /etc/ftpd/ftpusers"
+          ansible.builtin.lineinfile:
+            path: "/etc/ftpd/ftpusers"
+            line: "{{ BLOCK_USER }}"
+            regexp: '^[[:space:]]*root[[:space:]]*$'
+            state: present
+            create: no
+            backup: yes
+          register: r_u574
+          when: st_pro_ftpusers.stat.exists | default(false)
+    
+        - name: "U-57 | [U_57_4] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_574_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_574_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_4] /etc/ftpd/ftpusers에 root 차단 라인 적용",
+                      "cmd": "lineinfile: add 'root' @ /etc/ftpd/ftpusers",
+                      "result": "changed=" ~ (((r_u574.changed|default(false))|bool)|string)
+                                ~ ", backup_file=" ~ (r_u574.backup_file | default("<none>"))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_574_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_4] ProFTP ftpusers(/etc/ftpd/ftpusers)에서 root 계정 차단 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u574.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when: st_pro_ftpusers.stat.exists | default(false)
+    
+        - name: "U-57 | [U_57_4] LOG basis (missing → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_574_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_574_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_4] /etc/ftpd/ftpusers 파일 미존재: ProFTP 미설치/미사용 또는 배포 표준 경로 비대상 가능 — 조치 타겟 부재로 자동조치 불가(info) — 담당자 확인 필요",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when: not (st_pro_ftpusers.stat.exists | default(false))
+    
+        - name: "U-57 | [U_57_4] summary LOG(JSONL)"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_574_s
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_574_s.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_4] summary",
+                      "cmd": "/etc/ftpd/ftpusers: detect + ensure 'root'",
+                      "result": "exists=" ~ (((st_pro_ftpusers.stat.exists | default(false))|bool)|string)
+                                ~ ", changed=" ~ ((((r_u574.changed|default(false))|bool)|string))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+        # =========================================================
+        # U_57_5 : ProFTP - proftpd.conf RootLogin off (UseFtpUsers=off 케이스)
+        # - UseFtpUsers=ON이면 RootLogin 조치 대상 아님(양호)
+        # - UseFtpUsers=OFF이면 RootLogin off lineinfile 적용 + proftpd 재시작 시도
+        # =========================================================
+        - name: "U-57 | stat proftpd conf candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: "{{ PROFTPD_CONF_CANDIDATES }}"
+          register: st_pro_conf
+          changed_when: false
+    
+        - name: "U-57 | pick proftpd_conf_path"
+          ansible.builtin.set_fact:
+            proftpd_conf_path: >-
+              {{
+                (st_pro_conf.results | selectattr('stat.exists','equalto',true)
+                  | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        - name: "U-57 | read UseFtpUsers (default ON)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            CONF="{{ proftpd_conf_path }}"
+            if [ -z "$CONF" ] || [ ! -f "$CONF" ]; then
+              echo "ON"; exit 0
+            fi
+            v=$(grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null \
+              | grep -E "^[[:space:]]*UseFtpUsers[[:space:]]+" \
+              | tail -n 1 | awk '{print $2}' | tr -d ' \t\r' | tr 'a-z' 'A-Z')
+            [ -z "$v" ] && v="ON"
+            echo "$v"
+          args:
+            executable: /bin/bash
+          register: r_useftp
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-57 | set proftpd_useftpusers"
+          ansible.builtin.set_fact:
+            proftpd_useftpusers: "{{ (r_useftp.stdout | default('ON')) }}"
+          changed_when: false
+    
+        - name: "U-57 | [U_57_5] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_575_a
+          changed_when: false
+    
+        - name: "U-57 | [U_57_5] LOG step (UseFtpUsers) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_575_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_57_5] proftpd UseFtpUsers 확인",
+                  "cmd": "grep UseFtpUsers @ " ~ (proftpd_conf_path | default("<none>")),
+                  "result": "UseFtpUsers=" ~ (proftpd_useftpusers | default("ON"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-57 | [U_57_5] set RootLogin off (when UseFtpUsers=OFF)"
+          ansible.builtin.lineinfile:
+            path: "{{ proftpd_conf_path }}"
+            regexp: '^[[:space:]]*RootLogin[[:space:]]+'
+            line: 'RootLogin off'
+            state: present
+            create: no
+            backup: yes
+          register: r_u575
+          when:
+            - proftpd_conf_path != ""
+            - (proftpd_useftpusers | default("ON")) == "OFF"
+    
+        - name: "U-57 | [U_57_5] proftpd restart (attempt only when changed)"
+          ansible.builtin.systemd:
+            name: "proftpd"
+            state: restarted
+          register: r_proftpd_restart
+          failed_when: false
+          when:
+            - proftpd_conf_path != ""
+            - (proftpd_useftpusers | default("ON")) == "OFF"
+            - (r_u575.changed | default(false)) | bool
+    
+        - name: "U-57 | [U_57_5] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_575_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_575_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_5] proftpd RootLogin off 적용(UseFtpUsers=OFF)",
+                      "cmd": "lineinfile: RootLogin off @ " ~ proftpd_conf_path ~ " ; systemd restart proftpd when changed",
+                      "result": "changed=" ~ (((r_u575.changed|default(false))|bool)|string)
+                                ~ ", restart_attempted=" ~ ((((r_u575.changed|default(false))|bool)|string))
+                                ~ ", restart_failed=" ~ ((((r_proftpd_restart.failed|default(false))|bool)|string))
+                                ~ ", restart_msg=" ~ ((r_proftpd_restart.msg | default("") | string) | truncate(160, True, "..."))
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_575_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_5] UseFtpUsers=OFF 환경: proftpd.conf RootLogin off 기준 미충족 상태를 교정 적용(필요 시 재시작 시도)",
+                      "status": (((r_u575.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - proftpd_conf_path != ""
+            - (proftpd_useftpusers | default("ON")) == "OFF"
+    
+        - name: "U-57 | [U_57_5] LOG basis (UseFtpUsers=ON → not applicable) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_575_on
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_575_on.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_5] UseFtpUsers=ON 환경: ftpusers 기반 접근제어 정책 사용(또는 기본값)으로 RootLogin off 직접 설정 조치 대상 아님",
+                      "status": "양호"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - proftpd_conf_path != ""
+            - (proftpd_useftpusers | default("ON")) != "OFF"
+    
+        - name: "U-57 | [U_57_5] LOG basis (proftpd conf missing → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_575_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_575_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_57_5] proftpd 설정파일(proftpd.conf) 미존재: ProFTP 미설치/미사용 가능 — UseFtpUsers/RootLogin 정책 판단 불가로 자동조치 불가(info) — 담당자 확인 필요",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when: proftpd_conf_path == ""
+    
+        - name: "U-57 | [U_57_5] summary LOG(JSONL)"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_575_s
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_575_s.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_57_5] summary",
+                      "cmd": "proftpd RootLogin: detect conf + UseFtpUsers + optional RootLogin off + optional restart",
+                      "result": "conf=" ~ (proftpd_conf_path | default("<none>"))
+                                ~ ", UseFtpUsers=" ~ (proftpd_useftpusers | default("ON"))
+                                ~ ", changed=" ~ ((((r_u575.changed|default(false))|bool)|string))
+                                ~ ", restart_failed=" ~ ((((r_proftpd_restart.failed|default(false))|bool)|string))
+                    } | to_json
+                  }}
+              changed_when: false

@@ -1,0 +1,754 @@
+    ---
+    - name: "U-56 | Remediate FTP Access Control (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-56"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+        # ===== 자동조치(안전 범위) =====
+        AUTO_OWNER: "root"
+        AUTO_GROUP: "root"
+        AUTO_MODE: "0640"
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-56 | init defaults"
+          ansible.builtin.set_fact:
+            # U_56_1
+            r_u561: {}
+            # vsftpd
+            vsftpd_conf_path: ""
+            vsftpd_userlist_enable: "NO"
+            vsftpd_ftpusers_path: ""
+            vsftpd_userlist_path: ""
+            r_u562: {}
+            r_u563: {}
+            # proftpd
+            proftpd_conf_path: ""
+            proftpd_useftpusers: "ON"
+            proftpd_has_limit_login: false
+            r_u564: {}
+            r_u565_conf: {}
+          changed_when: false
+    
+        # =========================================================
+        # U_56_1 : /etc/ftpusers 권한/소유자(root:root,0640) 조치
+        # - 파일이 없으면 자동조치 불가(info) 기록 후 다음 진행
+        # =========================================================
+        - name: "U-56 | [U_56_1] stat /etc/ftpusers"
+          ansible.builtin.stat:
+            path: "/etc/ftpusers"
+          register: st_ftpusers
+          changed_when: false
+    
+        - name: "U-56 | [U_56_1] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_561_a
+          changed_when: false
+    
+        - name: "U-56 | [U_56_1] LOG step (existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_561_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_56_1] /etc/ftpusers 파일 존재 여부",
+                  "cmd": "[ -f /etc/ftpusers ]",
+                  "result": (st_ftpusers.stat.exists | default(false)) | ternary("파일 존재","파일 없음")
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-56 | [U_56_1] enforce owner/mode"
+          ansible.builtin.file:
+            path: "/etc/ftpusers"
+            owner: "{{ AUTO_OWNER }}"
+            group: "{{ AUTO_GROUP }}"
+            mode: "{{ AUTO_MODE }}"
+          register: r_u561
+          when: st_ftpusers.stat.exists | default(false)
+    
+        - name: "U-56 | [U_56_1] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_561_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_561_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_56_1] /etc/ftpusers 소유자/권한(root:root,0640) 조치",
+                      "cmd": "file: owner=root group=root mode=0640 @ /etc/ftpusers",
+                      "result": "changed=" ~ (((r_u561.changed|default(false))|bool)|string)
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_561_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_1] /etc/ftpusers 권한/소유자(root:root,0640) 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u561.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when: st_ftpusers.stat.exists | default(false)
+    
+        - name: "U-56 | [U_56_1] LOG basis (auto not possible) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_561_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_561_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_1] /etc/ftpusers 파일 미존재: FTP 접근제어(차단 계정 목록) 파일이 구성되지 않았거나 서비스 미사용 가능 — 조치 타겟 부재로 자동조치 불가(info) — 담당자 확인 필요",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when: not (st_ftpusers.stat.exists | default(false))
+    
+        # =========================================================
+        # U_56_2 / U_56_3 : vsftpd 분기
+        # - userlist_enable!=YES : ftpusers 권한 조치(파일 없으면 info)
+        # - userlist_enable=YES  : user_list 권한 조치(파일 없으면 info)
+        # =========================================================
+        - name: "U-56 | stat vsftpd conf candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/vsftpd/vsftpd.conf"
+            - "/etc/vsftpd.conf"
+          register: st_vs_conf
+          changed_when: false
+    
+        - name: "U-56 | pick vsftpd_conf_path"
+          ansible.builtin.set_fact:
+            vsftpd_conf_path: >-
+              {{
+                (st_vs_conf.results | selectattr('stat.exists','equalto',true) | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        - name: "U-56 | read userlist_enable (default NO)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            CONF="{{ vsftpd_conf_path }}"
+            if [ -z "$CONF" ] || [ ! -f "$CONF" ]; then
+              echo "NO"; exit 0
+            fi
+            v=$(grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null \
+                | grep -E "^[[:space:]]*userlist_enable[[:space:]]*=" \
+                | tail -n 1 | awk -F= '{print $2}' | tr -d ' \t\r' | tr 'a-z' 'A-Z')
+            [ -z "$v" ] && v="NO"
+            echo "$v"
+          args:
+            executable: /bin/bash
+          register: r_vs_enable
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-56 | set vsftpd_userlist_enable"
+          ansible.builtin.set_fact:
+            vsftpd_userlist_enable: "{{ (r_vs_enable.stdout | default('NO')) }}"
+          changed_when: false
+    
+        - name: "U-56 | ts (vsftpd enable)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_vs_1
+          changed_when: false
+    
+        - name: "U-56 | LOG step JSONL (vsftpd userlist_enable)"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_vs_1.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_56_2/U_56_3] vsftpd userlist_enable 확인",
+                  "cmd": "grep userlist_enable @ " ~ (vsftpd_conf_path | default("<none>")),
+                  "result": "userlist_enable=" ~ (vsftpd_userlist_enable | default("NO"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-56 | stat vsftpd ftpusers candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/vsftpd.ftpusers"
+            - "/etc/vsftpd/ftpusers"
+          register: st_vs_ftpusers
+          changed_when: false
+    
+        - name: "U-56 | stat vsftpd user_list candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/vsftpd.user_list"
+            - "/etc/vsftpd/user_list"
+          register: st_vs_userlist
+          changed_when: false
+    
+        - name: "U-56 | pick vsftpd_ftpusers_path / vsftpd_userlist_path"
+          ansible.builtin.set_fact:
+            vsftpd_ftpusers_path: >-
+              {{
+                (st_vs_ftpusers.results | selectattr('stat.exists','equalto',true) | map(attribute='item') | list | first) | default("")
+              }}
+            vsftpd_userlist_path: >-
+              {{
+                (st_vs_userlist.results | selectattr('stat.exists','equalto',true) | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        # ---------- U_56_2 ----------
+        - name: "U-56 | [U_56_2] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_562_a
+          changed_when: false
+          when: (vsftpd_userlist_enable | default("NO")) != "YES"
+    
+        - name: "U-56 | [U_56_2] LOG step (ftpusers existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_562_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_56_2] vsftpd ftpusers 파일 존재 여부(userlist_enable!=YES)",
+                  "cmd": "[ -f /etc/vsftpd/ftpusers ] (or /etc/vsftpd.ftpusers)",
+                  "result": (vsftpd_ftpusers_path != "") | ternary("파일 존재","파일 없음")
+                } | to_json
+              }}
+          changed_when: false
+          when: (vsftpd_userlist_enable | default("NO")) != "YES"
+    
+        - name: "U-56 | [U_56_2] enforce ftpusers owner/mode"
+          ansible.builtin.file:
+            path: "{{ vsftpd_ftpusers_path }}"
+            owner: "{{ AUTO_OWNER }}"
+            group: "{{ AUTO_GROUP }}"
+            mode: "{{ AUTO_MODE }}"
+          register: r_u562
+          when:
+            - (vsftpd_userlist_enable | default("NO")) != "YES"
+            - vsftpd_ftpusers_path != ""
+    
+        - name: "U-56 | [U_56_2] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_562_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_562_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_56_2] vsftpd ftpusers 소유자/권한(root:root,0640) 조치",
+                      "cmd": "file: owner=root group=root mode=0640 @ " ~ vsftpd_ftpusers_path,
+                      "result": "changed=" ~ (((r_u562.changed|default(false))|bool)|string)
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_562_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_2] userlist_enable!=YES 환경: ftpusers 권한/소유자(root:root,0640) 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u562.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) != "YES"
+            - vsftpd_ftpusers_path != ""
+    
+        - name: "U-56 | [U_56_2] LOG basis (auto not possible) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_562_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_562_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (
+                        (vsftpd_conf_path | default("") == "")
+                        | ternary(
+                            "[U_56_2] vsftpd 설정파일 미존재(후보 경로 모두 없음)로 서비스 미설치/미사용 가능 — 조치대상(ftpusers) 특정 불가(info) — 담당자 확인 필요",
+                            "[U_56_2] userlist_enable!=YES 인데 ftpusers 파일 경로가 확인되지 않아 자동조치 불가(info) — 담당자 수동조치 대상(대시보드 메뉴얼 참고)"
+                          )
+                      ),
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) != "YES"
+            - vsftpd_ftpusers_path == ""
+    
+        # ---------- U_56_3 ----------
+        - name: "U-56 | [U_56_3] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_563_a
+          changed_when: false
+          when: (vsftpd_userlist_enable | default("NO")) == "YES"
+    
+        - name: "U-56 | [U_56_3] LOG step (user_list existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_563_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_56_3] vsftpd user_list 파일 존재 여부(userlist_enable=YES)",
+                  "cmd": "[ -f /etc/vsftpd/user_list ] (or /etc/vsftpd.user_list)",
+                  "result": (vsftpd_userlist_path != "") | ternary("파일 존재","파일 없음")
+                } | to_json
+              }}
+          changed_when: false
+          when: (vsftpd_userlist_enable | default("NO")) == "YES"
+    
+        - name: "U-56 | [U_56_3] enforce user_list owner/mode"
+          ansible.builtin.file:
+            path: "{{ vsftpd_userlist_path }}"
+            owner: "{{ AUTO_OWNER }}"
+            group: "{{ AUTO_GROUP }}"
+            mode: "{{ AUTO_MODE }}"
+          register: r_u563
+          when:
+            - (vsftpd_userlist_enable | default("NO")) == "YES"
+            - vsftpd_userlist_path != ""
+    
+        - name: "U-56 | [U_56_3] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_563_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_563_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_56_3] vsftpd user_list 소유자/권한(root:root,0640) 조치",
+                      "cmd": "file: owner=root group=root mode=0640 @ " ~ vsftpd_userlist_path,
+                      "result": "changed=" ~ (((r_u563.changed|default(false))|bool)|string)
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_563_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_3] userlist_enable=YES 환경: user_list 권한/소유자(root:root,0640) 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u563.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) == "YES"
+            - vsftpd_userlist_path != ""
+    
+        - name: "U-56 | [U_56_3] LOG basis (auto not possible) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_563_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_563_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": (
+                        (vsftpd_conf_path | default("") == "")
+                        | ternary(
+                            "[U_56_3] vsftpd 설정파일 미존재(후보 경로 모두 없음)로 서비스 미설치/미사용 가능 — 조치대상(user_list) 특정 불가(info) — 담당자 확인 필요",
+                            "[U_56_3] userlist_enable=YES 인데 user_list 파일 경로가 확인되지 않아 자동조치 불가(info) — 담당자 수동조치 대상(대시보드 메뉴얼 참고)"
+                          )
+                      ),
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (vsftpd_userlist_enable | default("NO")) == "YES"
+            - vsftpd_userlist_path == ""
+    
+        # =========================================================
+        # U_56_4 : /etc/ftpd/ftpusers 권한/소유자(root:root,0640) 조치(파일 존재 시만)
+        # =========================================================
+        - name: "U-56 | [U_56_4] stat /etc/ftpd/ftpusers"
+          ansible.builtin.stat:
+            path: "/etc/ftpd/ftpusers"
+          register: st_ftpd_ftpusers
+          changed_when: false
+    
+        - name: "U-56 | [U_56_4] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_564_a
+          changed_when: false
+    
+        - name: "U-56 | [U_56_4] LOG step (existence) JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_564_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_56_4] /etc/ftpd/ftpusers 파일 존재 여부",
+                  "cmd": "[ -f /etc/ftpd/ftpusers ]",
+                  "result": (st_ftpd_ftpusers.stat.exists | default(false)) | ternary("파일 존재","파일 없음")
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-56 | [U_56_4] enforce owner/mode"
+          ansible.builtin.file:
+            path: "/etc/ftpd/ftpusers"
+            owner: "{{ AUTO_OWNER }}"
+            group: "{{ AUTO_GROUP }}"
+            mode: "{{ AUTO_MODE }}"
+          register: r_u564
+          when: st_ftpd_ftpusers.stat.exists | default(false)
+    
+        - name: "U-56 | [U_56_4] LOG step+basis (applied) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_564_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_564_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_56_4] /etc/ftpd/ftpusers 소유자/권한(root:root,0640) 조치",
+                      "cmd": "file: owner=root group=root mode=0640 @ /etc/ftpd/ftpusers",
+                      "result": "changed=" ~ (((r_u564.changed|default(false))|bool)|string)
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_564_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_4] /etc/ftpd/ftpusers 권한/소유자(root:root,0640) 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u564.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when: st_ftpd_ftpusers.stat.exists | default(false)
+    
+        - name: "U-56 | [U_56_4] LOG basis (missing → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_564_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_564_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_4] /etc/ftpd/ftpusers 파일 미존재: 해당 FTP 데몬/구성이 미사용이거나 표준 경로 비대상 가능 — 조치 타겟 부재로 자동조치 불가(info) — 담당자 확인 필요",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when: not (st_ftpd_ftpusers.stat.exists | default(false))
+    
+        # =========================================================
+        # U_56_5 : proftpd (UseFtpUsers=OFF) → proftpd.conf 권한/소유자 조치
+        # - <Limit LOGIN>은 자동 삽입 금지: 없으면 info 로그만 남김
+        # - UseFtpUsers=ON(기본값 포함) 케이스도 basis 1줄(양호/조치불필요) 남김
+        # =========================================================
+        - name: "U-56 | stat proftpd conf candidates"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/etc/proftpd.conf"
+            - "/etc/proftpd/proftpd.conf"
+          register: st_pro_conf
+          changed_when: false
+    
+        - name: "U-56 | pick proftpd_conf_path"
+          ansible.builtin.set_fact:
+            proftpd_conf_path: >-
+              {{
+                (st_pro_conf.results | selectattr('stat.exists','equalto',true) | map(attribute='item') | list | first) | default("")
+              }}
+          changed_when: false
+    
+        - name: "U-56 | read UseFtpUsers (default ON)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            CONF="{{ proftpd_conf_path }}"
+            if [ -z "$CONF" ] || [ ! -f "$CONF" ]; then
+              echo "ON"; exit 0
+            fi
+            v=$(grep -v "^[[:space:]]*#" "$CONF" 2>/dev/null \
+                | grep -E "^[[:space:]]*UseFtpUsers[[:space:]]+" \
+                | tail -n 1 | awk '{print $2}' | tr -d ' \t\r' | tr 'a-z' 'A-Z')
+            [ -z "$v" ] && v="ON"
+            echo "$v"
+          args:
+            executable: /bin/bash
+          register: r_useftp
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-56 | set proftpd_useftpusers"
+          ansible.builtin.set_fact:
+            proftpd_useftpusers: "{{ (r_useftp.stdout | default('ON')) }}"
+          changed_when: false
+    
+        - name: "U-56 | check <Limit LOGIN> (case-insensitive)"
+          ansible.builtin.shell: |
+            CONF="{{ proftpd_conf_path }}"
+            if [ -z "$CONF" ] || [ ! -f "$CONF" ]; then
+              echo "NO"; exit 0
+            fi
+            grep -iq "<Limit[[:space:]]+LOGIN>" "$CONF" && echo "YES" || echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_limit
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-56 | set proftpd_has_limit_login"
+          ansible.builtin.set_fact:
+            proftpd_has_limit_login: "{{ (r_limit.stdout | default('NO')) == 'YES' }}"
+          changed_when: false
+    
+        - name: "U-56 | [U_56_5] ts"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_565_a
+          changed_when: false
+    
+        - name: "U-56 | [U_56_5] LOG step JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_565_a.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_56_5] proftpd UseFtpUsers 및 <Limit LOGIN> 확인",
+                  "cmd": "grep UseFtpUsers / grep -i '<Limit LOGIN>' @ " ~ (proftpd_conf_path | default("<none>")),
+                  "result": "UseFtpUsers=" ~ (proftpd_useftpusers | default("ON")) ~ ", LimitLOGIN=" ~ (proftpd_has_limit_login | ternary("YES","NO"))
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-56 | [U_56_5] enforce proftpd.conf perms when UseFtpUsers=OFF"
+          ansible.builtin.file:
+            path: "{{ proftpd_conf_path }}"
+            owner: "{{ AUTO_OWNER }}"
+            group: "{{ AUTO_GROUP }}"
+            mode: "{{ AUTO_MODE }}"
+          register: r_u565_conf
+          when:
+            - (proftpd_useftpusers | default("ON")) == "OFF"
+            - proftpd_conf_path != ""
+    
+        - name: "U-56 | [U_56_5] LOG step+basis (conf perms) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_565_b
+              changed_when: false
+    
+            - name: "LOG step"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_565_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_STEP,
+                      "title": "[U_56_5] proftpd.conf 소유자/권한(root:root,0640) 조치(UseFtpUsers=OFF)",
+                      "cmd": "file: owner=root group=root mode=0640 @ " ~ proftpd_conf_path,
+                      "result": "changed=" ~ (((r_u565_conf.changed|default(false))|bool)|string)
+                    } | to_json
+                  }}
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_565_b.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_5] UseFtpUsers=OFF 환경: proftpd.conf 권한/소유자(root:root,0640) 기준 미충족 상태를 교정 적용",
+                      "status": (((r_u565_conf.changed|default(false))|bool) | ternary("취약","양호"))
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (proftpd_useftpusers | default("ON")) == "OFF"
+            - proftpd_conf_path != ""
+    
+        - name: "U-56 | [U_56_5] LOG basis (Limit LOGIN missing → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_565_c
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_565_c.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_5] <Limit LOGIN> 미설정: 접근제어 정책(허용/거부/예외) 판단이 필요하여 자동조치 불가(info) — 담당자 수동조치 대상(대시보드 메뉴얼 참고)",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - (proftpd_useftpusers | default("ON")) == "OFF"
+            - (proftpd_conf_path != "")
+            - not (proftpd_has_limit_login | default(false))
+    
+        - name: "U-56 | [U_56_5] LOG basis (UseFtpUsers=ON → not applicable) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_565_on
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_565_on.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_5] UseFtpUsers=ON 환경: ftpusers 기반 접근제어 정책 사용(또는 기본값)으로 proftpd.conf 권한조치 대상 아님",
+                      "status": "양호"
+                    } | to_json
+                  }}
+              changed_when: false
+          when:
+            - proftpd_conf_path != ""
+            - (proftpd_useftpusers | default("ON")) != "OFF"
+    
+        - name: "U-56 | [U_56_5] LOG basis (proftpd conf missing → info) JSONL"
+          block:
+            - name: "ts"
+              ansible.builtin.command: "{{ LOG_TS_CMD }}"
+              register: ts_565_na
+              changed_when: false
+    
+            - name: "LOG basis"
+              ansible.builtin.debug:
+                msg: >-
+                  {{
+                    {
+                      "ts": (ts_565_na.stdout | default("")),
+                      "flag_id": FLAG_ID,
+                      "section": LOG_SECTION_BASIS,
+                      "title": LOG_TITLE_BASIS,
+                      "basis": "[U_56_5] proftpd 설정파일(proftpd.conf) 미존재: 서비스 미설치/미사용 가능 — 조치 타겟 부재로 자동조치 불가(info) — 담당자 확인 필요",
+                      "status": "info"
+                    } | to_json
+                  }}
+              changed_when: false
+          when: proftpd_conf_path == ""

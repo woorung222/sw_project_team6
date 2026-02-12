@@ -1,0 +1,412 @@
+    ---
+    - name: "U-65 | Remediate NTP/Chrony Time Sync (Controlled Env, Logs-Only JSONL)"
+      hosts: all
+      become: yes
+      gather_facts: no
+    
+      vars:
+        FLAG_ID: "U-65"
+    
+        # ===== 팀 로그 템플릿(고정) =====
+        LOG_SECTION_STEP: "[조치 내용]"
+        LOG_SECTION_BASIS: "[조치 결과]"
+        LOG_TITLE_BASIS: "조치 근거"
+        LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    
+        # ===== 정책 값(운영자 지정) =====
+        # - 비어 있으면 "서버 미지정"으로 자동조치 금지(info)만 남김
+        # - 예: ["time1.company.local", "time2.company.local"] 또는 ["133.243.238.244", "time.google.com"]
+        NTP_SERVERS: []
+    
+        # ===== 경로(표준) =====
+        CHRONY_CONF_RH: "/etc/chrony.conf"
+        CHRONY_CONF_DEB: "/etc/chrony/chrony.conf"
+        NTP_CONF: "/etc/ntp.conf"
+    
+      tasks:
+        # ---------------------------------------------------------
+        # (공통) 미정의 방지
+        # ---------------------------------------------------------
+        - name: "U-65 | init defaults"
+          ansible.builtin.set_fact:
+            os_family: "UNKNOWN"  # REDHAT/DEBIAN/UNKNOWN
+    
+            # flags
+            U_65_1: 0  # 시간 동기화 구성요소 미존재
+            U_65_2: 0  # chrony 설치/사용인데 서비스 비활성 또는 서버 미설정
+            U_65_3: 0  # ntp 설치/사용인데 서비스 비활성 또는 서버 미설정
+    
+            # detect
+            has_chrony_pkg: "NO"
+            has_ntp_pkg: "NO"
+            has_timesyncd: "NO"
+            chrony_active: "NO"
+            ntp_active: "NO"
+    
+            chrony_conf_path: ""
+            chrony_has_server: "NO"
+            ntp_has_server: "NO"
+    
+            # remediation
+            ntp_servers_ready: "NO"
+            r_chrony_add: {}
+            r_ntp_add: {}
+            r_restart: {}
+    
+            # safe strings for logs (avoid nested ternary in to_json)
+            u65_step_cmd: ""
+            u65_step_result: ""
+            u65_basis_msg: ""
+            u65_status_val: "info"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # OS family 감지
+        # ---------------------------------------------------------
+        - name: "U-65 | detect OS family"
+          ansible.builtin.shell: |
+            if [ -f /etc/redhat-release ]; then
+              echo "REDHAT"
+            elif [ -f /etc/debian_version ]; then
+              echo "DEBIAN"
+            else
+              echo "UNKNOWN"
+            fi
+          args:
+            executable: /bin/bash
+          register: r_os
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-65 | set os_family"
+          ansible.builtin.set_fact:
+            os_family: "{{ r_os.stdout | default('UNKNOWN') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # 정책 값 준비 여부
+        # ---------------------------------------------------------
+        - name: "U-65 | set ntp_servers_ready"
+          ansible.builtin.set_fact:
+            ntp_servers_ready: "{{ ((NTP_SERVERS | default([])) | length > 0) | ternary('YES','NO') }}"
+          changed_when: false
+    
+        # ---------------------------------------------------------
+        # 패키지/서비스 감지 (업로드된 점검 로직 개념 반영) :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
+        # ---------------------------------------------------------
+        - name: "U-65 | detect chrony/ntp packages (rpm/dpkg best-effort)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            HAS_CHRONY="NO"
+            HAS_NTP="NO"
+    
+            if command -v rpm >/dev/null 2>&1; then
+              rpm -qa | grep -qE "^chrony-[0-9]" && HAS_CHRONY="YES" || true
+              rpm -qa | grep -qE "^ntp-[0-9]" && HAS_NTP="YES" || true
+            elif command -v dpkg-query >/dev/null 2>&1; then
+              dpkg-query -W -f='${Package}\n' 2>/dev/null | grep -qx "chrony" && HAS_CHRONY="YES" || true
+              dpkg-query -W -f='${Package}\n' 2>/dev/null | grep -qx "ntp" && HAS_NTP="YES" || true
+            else
+              true
+            fi
+    
+            echo "CHRONY=${HAS_CHRONY}"
+            echo "NTP=${HAS_NTP}"
+          args:
+            executable: /bin/bash
+          register: r_pkgs
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-65 | parse pkg detect"
+          ansible.builtin.set_fact:
+            has_chrony_pkg: "{{ (r_pkgs.stdout_lines | select('match','^CHRONY=') | list | first | default('CHRONY=NO')).split('=')[1] }}"
+            has_ntp_pkg: "{{ (r_pkgs.stdout_lines | select('match','^NTP=') | list | first | default('NTP=NO')).split('=')[1] }}"
+          changed_when: false
+    
+        - name: "U-65 | detect systemd-timesyncd active (Ubuntu baseline)"
+          ansible.builtin.shell: |
+            systemctl is-active --quiet systemd-timesyncd && echo "YES" || echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_timesyncd
+          changed_when: false
+          failed_when: false
+          when: os_family == "DEBIAN"
+    
+        - name: "U-65 | set has_timesyncd"
+          ansible.builtin.set_fact:
+            has_timesyncd: "{{ r_timesyncd.stdout | default('NO') }}"
+          changed_when: false
+          when: os_family == "DEBIAN"
+    
+        # ---------------------------------------------------------
+        # chrony 서비스 활성/설정(server|pool) 감지
+        # ---------------------------------------------------------
+        - name: "U-65 | pick chrony conf path"
+          ansible.builtin.set_fact:
+            chrony_conf_path: >-
+              {{
+                (os_family == 'REDHAT')
+                | ternary(CHRONY_CONF_RH, CHRONY_CONF_DEB)
+              }}
+          changed_when: false
+    
+        - name: "U-65 | detect chrony service active (best-effort)"
+          ansible.builtin.shell: |
+            # RHEL: chronyd, Debian/Ubuntu: chrony(또는 chronyd)
+            systemctl is-active --quiet chronyd && echo "YES" && exit 0
+            systemctl is-active --quiet chrony && echo "YES" && exit 0
+            echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_chrony_active
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-65 | set chrony_active"
+          ansible.builtin.set_fact:
+            chrony_active: "{{ r_chrony_active.stdout | default('NO') }}"
+          changed_when: false
+    
+        - name: "U-65 | detect chrony server/pool directives"
+          ansible.builtin.shell: |
+            CONF="{{ chrony_conf_path }}"
+            if [ -f "$CONF" ]; then
+              grep -E "^(server|pool)[[:space:]]+" "$CONF" 2>/dev/null | grep -v "^[[:space:]]*#" >/dev/null 2>&1 \
+                && echo "YES" || echo "NO"
+            else
+              echo "NO"
+            fi
+          args:
+            executable: /bin/bash
+          register: r_chrony_has
+          changed_when: false
+          failed_when: false
+          when: has_chrony_pkg == "YES"
+    
+        - name: "U-65 | set chrony_has_server"
+          ansible.builtin.set_fact:
+            chrony_has_server: "{{ r_chrony_has.stdout | default('NO') }}"
+          changed_when: false
+          when: has_chrony_pkg == "YES"
+    
+        # ---------------------------------------------------------
+        # ntp 서비스 활성/설정(server|pool) 감지
+        # ---------------------------------------------------------
+        - name: "U-65 | detect ntp service active (ntp or ntpd)"
+          ansible.builtin.shell: |
+            systemctl is-active --quiet ntp && echo "YES" && exit 0
+            systemctl is-active --quiet ntpd && echo "YES" && exit 0
+            echo "NO"
+          args:
+            executable: /bin/bash
+          register: r_ntp_active
+          changed_when: false
+          failed_when: false
+    
+        - name: "U-65 | set ntp_active"
+          ansible.builtin.set_fact:
+            ntp_active: "{{ r_ntp_active.stdout | default('NO') }}"
+          changed_when: false
+    
+        - name: "U-65 | detect ntp server/pool directives"
+          ansible.builtin.shell: |
+            CONF="{{ NTP_CONF }}"
+            if [ -f "$CONF" ]; then
+              grep -E "^(server|pool)[[:space:]]+" "$CONF" 2>/dev/null | grep -v "^[[:space:]]*#" >/dev/null 2>&1 \
+                && echo "YES" || echo "NO"
+            else
+              echo "NO"
+            fi
+          args:
+            executable: /bin/bash
+          register: r_ntp_has
+          changed_when: false
+          failed_when: false
+          when: has_ntp_pkg == "YES"
+    
+        - name: "U-65 | set ntp_has_server"
+          ansible.builtin.set_fact:
+            ntp_has_server: "{{ r_ntp_has.stdout | default('NO') }}"
+          changed_when: false
+          when: has_ntp_pkg == "YES"
+    
+        # ---------------------------------------------------------
+        # flags 산출 (업로드 스크립트의 의미를 그대로 가져감) :contentReference[oaicite:4]{index=4} :contentReference[oaicite:5]{index=5}
+        # ---------------------------------------------------------
+        - name: "U-65 | compute flags"
+          ansible.builtin.set_fact:
+            # U_65_1: 아무 것도 없음
+            U_65_1: >-
+              {{
+                (
+                  (has_chrony_pkg != 'YES')
+                  and (has_ntp_pkg != 'YES')
+                  and ( (os_family == 'DEBIAN') | ternary(has_timesyncd != 'YES', true) )
+                ) | ternary(1,0)
+              }}
+            # U_65_2: chrony 설치인데 active 아니거나 server/pool 없음
+            U_65_2: >-
+              {{
+                (has_chrony_pkg == 'YES'
+                 and (chrony_active != 'YES' or chrony_has_server != 'YES')) | ternary(1,0)
+              }}
+            # U_65_3: ntp 설치인데 active 아니거나 server/pool 없음
+            U_65_3: >-
+              {{
+                (has_ntp_pkg == 'YES'
+                 and (ntp_active != 'YES' or ntp_has_server != 'YES')) | ternary(1,0)
+              }}
+          changed_when: false
+    
+        # =========================================================
+        # (조치) 서버 목록이 제공된 경우에만 "server <addr>" 라인 추가 + 서비스 재시작
+        # - 서버 목록 미제공: 자동삽입 금지(info)
+        # - 이미 server/pool이 있으면 변경 불필요
+        # =========================================================
+        - name: "U-65 | add chrony servers when needed"
+          ansible.builtin.lineinfile:
+            path: "{{ chrony_conf_path }}"
+            line: "server {{ item }}"
+            insertafter: EOF
+            create: no
+            backup: yes
+          loop: "{{ NTP_SERVERS }}"
+          register: r_chrony_add
+          when:
+            - ntp_servers_ready == "YES"
+            - has_chrony_pkg == "YES"
+            - chrony_has_server != "YES"
+    
+        - name: "U-65 | add ntp servers when needed"
+          ansible.builtin.lineinfile:
+            path: "{{ NTP_CONF }}"
+            line: "server {{ item }}"
+            insertafter: EOF
+            create: no
+            backup: yes
+          loop: "{{ NTP_SERVERS }}"
+          register: r_ntp_add
+          when:
+            - ntp_servers_ready == "YES"
+            - has_ntp_pkg == "YES"
+            - ntp_has_server != "YES"
+    
+        - name: "U-65 | restart time sync service (best-effort)"
+          ansible.builtin.shell: |
+            # 우선순위: chrony(chronyd/chrony) -> ntp(ntp/ntpd)
+            if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "chronyd.service"; then
+              systemctl restart chronyd || true
+              exit 0
+            fi
+            if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "chrony.service"; then
+              systemctl restart chrony || true
+              exit 0
+            fi
+            if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "ntp.service"; then
+              systemctl restart ntp || true
+              exit 0
+            fi
+            if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "ntpd.service"; then
+              systemctl restart ntpd || true
+              exit 0
+            fi
+            true
+          args:
+            executable: /bin/bash
+          register: r_restart
+          changed_when: false
+          failed_when: false
+          when: >
+            ( (r_chrony_add is defined and (r_chrony_add.results | default([]) | selectattr('changed','equalto',true) | list | length > 0))
+              or
+              (r_ntp_add is defined and (r_ntp_add.results | default([]) | selectattr('changed','equalto',true) | list | length > 0))
+            )
+    
+        # =========================================================
+        # LOG step / basis (템플릿 안전: 문자열은 set_fact로 먼저 확정)
+        # =========================================================
+        - name: "U-65 | build step cmd/result safely"
+          ansible.builtin.set_fact:
+            u65_step_cmd: >-
+              systemctl is-active chronyd/chrony/ntp/ntpd ; (chrony.conf, ntp.conf) server|pool directives ; policy NTP_SERVERS provided?
+            u65_step_result: >-
+              os_family={{ os_family }},
+              has_chrony_pkg={{ has_chrony_pkg }},
+              has_ntp_pkg={{ has_ntp_pkg }},
+              has_timesyncd={{ has_timesyncd }},
+              chrony_active={{ chrony_active }},
+              chrony_has_server={{ chrony_has_server }},
+              ntp_active={{ ntp_active }},
+              ntp_has_server={{ ntp_has_server }},
+              ntp_servers_ready={{ ntp_servers_ready }},
+              U_65_1={{ U_65_1 }}, U_65_2={{ U_65_2 }}, U_65_3={{ U_65_3 }}
+          changed_when: false
+    
+        - name: "U-65 | ts (step)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_651
+          changed_when: false
+    
+        - name: "U-65 | LOG step JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_651.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_STEP,
+                  "title": "[U_65_1/U_65_2/U_65_3] NTP/Chrony 동기화 구성/서버 설정 점검",
+                  "cmd": (u65_step_cmd | default("")),
+                  "result": (u65_step_result | default(""))
+                } | to_json
+              }}
+          changed_when: false
+    
+        - name: "U-65 | build basis/status safely"
+          ansible.builtin.set_fact:
+            u65_basis_msg: >-
+              {% if (U_65_1 | int) == 1 -%}
+              [U_65_1] 시간 동기화 구성요소(chrony/ntp{% if os_family=='DEBIAN' %}/systemd-timesyncd{% endif %})가 모두 미설치/비활성으로 시각 동기화 기반이 없음 — 설치/정책 적용 필요
+              {%- elif (ntp_servers_ready != 'YES') and ( (U_65_2 | int) == 1 or (U_65_3 | int) == 1 ) -%}
+              [U_65] 시간 동기화 서비스(chrony 또는 ntp)는 존재하나 동기화 서버(server/pool)가 미설정 또는 서비스 비활성. 동기화 서버 주소(NTP_SERVERS)가 정책 값으로 미지정되어 자동조치 금지(info) — 담당자 서버 목록 확정 후 반영 필요
+              {%- else -%}
+              [U_65] 시간 동기화 서버 설정 및 서비스 상태가 기준을 충족하거나, 정책 서버 목록 제공 시 서버 라인 반영/재시작까지 수행됨
+              {%- endif %}
+            u65_status_val: >-
+              {% if (U_65_1 | int) == 1 -%}
+              info
+              {%- elif ( (U_65_2 | int) == 1 or (U_65_3 | int) == 1 ) and (ntp_servers_ready != 'YES') -%}
+              info
+              {%- else -%}
+              {{ (
+                   (
+                     (r_chrony_add is defined and (r_chrony_add.results | default([]) | selectattr('changed','equalto',true) | list | length > 0))
+                     or
+                     (r_ntp_add is defined and (r_ntp_add.results | default([]) | selectattr('changed','equalto',true) | list | length > 0))
+                   )
+                   | ternary('취약','양호')
+                 ) }}
+              {%- endif %}
+          changed_when: false
+    
+        - name: "U-65 | ts (basis)"
+          ansible.builtin.command: "{{ LOG_TS_CMD }}"
+          register: ts_65b
+          changed_when: false
+    
+        - name: "U-65 | LOG basis JSONL"
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                {
+                  "ts": (ts_65b.stdout | default("")),
+                  "flag_id": FLAG_ID,
+                  "section": LOG_SECTION_BASIS,
+                  "title": LOG_TITLE_BASIS,
+                  "basis": (u65_basis_msg | default("")),
+                  "status": (u65_status_val | default("info"))
+                } | to_json
+              }}
+          changed_when: false
