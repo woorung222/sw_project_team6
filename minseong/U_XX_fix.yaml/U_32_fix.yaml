@@ -1,0 +1,40 @@
+---
+- name: "U-32 홈 디렉터리로 지정한 디렉터리의 존재 관리"
+  hosts: all
+  become: yes
+  tasks:
+    - name: "1. 사용자별 홈 디렉터리 정보 수집 (Step 1)"
+      # /etc/passwd에서 일반 사용자(UID 1000 이상)의 계정명과 홈 디렉터리 경로 추출
+      ansible.builtin.shell: "awk -F: '$3 >= 1000 {print $1\":\"$6}' /etc/passwd"
+      register: user_home_info
+      changed_when: false
+
+    - name: "2. 홈 디렉터리 존재 여부 확인"
+      ansible.builtin.stat:
+        path: "{{ item.split(':').1 }}"
+      loop: "{{ user_home_info.stdout_lines }}"
+      register: home_dir_stats
+
+    - name: "3. 홈 디렉터리가 없는 사용자 계정 추출 (취약 항목 식별)"
+      ansible.builtin.set_fact:
+        missing_homes: "{{ home_dir_stats.results | selectattr('stat.exists', 'equalto', false) | map(attribute='item') | list }}"
+
+    - name: "4. 점검 결과 출력"
+      ansible.builtin.debug:
+        msg: >-
+          {% if missing_homes | length == 0 %}
+          양호: 홈 디렉터리가 존재하지 않는 계정이 발견되지 않았습니다.
+          {% else %}
+          취약: 홈 디렉터리가 없는 계정이 발견되었습니다 ({{ missing_homes | join(', ') }})
+          {% endif %}
+
+    - name: "5. [조치] 존재하지 않는 홈 디렉터리 생성 (Step 3)"
+      # 가이드 조치 방법: 홈 디렉터리 설정 (여기서는 안전하게 디렉터리 생성 및 소유권 부여)
+      ansible.builtin.file:
+        path: "{{ item.split(':').1 }}"
+        state: directory
+        owner: "{{ item.split(':').0 }}"
+        group: "{{ item.split(':').0 }}"
+        mode: '0700' # 홈 디렉터리 기본 권한
+      loop: "{{ missing_homes }}"
+      when: missing_homes | length > 0

@@ -1,0 +1,18 @@
+---
+- name: 주요정보통신기반시설 보안 조치 - U-19 ( /etc/hosts 파일 소유자 및 권한 설정 )
+  hosts: all
+  become: yes
+
+  vars:
+  # 예시를 위해 DB에서 받은 데이터를 가정 (실제로는 postgres_query 등으로 받음)
+  # db_result.query_result[0].val 값이 '123'(숫자형 문자열)인지 'abc'(문자열)인지에 따라 분기
+  
+  tasks: 
+
+   - name: "소유자 및 권한 변경"
+     ansible.builtin.file:
+        path: /etc/hosts
+        owner: root
+        group: root   # 그룹 소유권도 root로 설정하는 것이 보안상 권장됩니다.
+        mode: '644'
+    

@@ -1,0 +1,47 @@
+---
+- name: 주요정보통신기반시설 보안 조치 - U-30 (  )
+  hosts: all
+  become: yes
+
+  vars:
+  # 예시를 위해 DB에서 받은 데이터를 가정 (실제로는 postgres_query 등으로 받음)
+  # db_result.query_result[0].val 값이 '123'(숫자형 문자열)인지 'abc'(문자열)인지에 따라 분기
+  
+  tasks: 
+   - name : 출력 함수 설정
+     ansible.builtin.shell: |
+      BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+      if [ -f "$BASE_DIR/common_logging.sh" ]; then
+       source "$BASE_DIR/common_logging.sh"
+      else
+       echo "Warning: common_logging.sh not found." >&2
+       run_cmd() { eval "$2"; }
+       log_step() { :; }
+       log_basis() { :; }
+      fi
+     register: CL
+     args:
+      executable: /bin/bash
+
+   # 1. /etc/profile 내 umask 설정 수정 (모든 리눅스 공통)
+   - name: "1. [/etc/profile] 기존 umask 설정 수정"
+     ansible.builtin.replace:
+        path: /etc/profile
+        regexp: '^\s*umask\s+\d+'
+        replace: 'umask 022'
+     register: profile_update
+
+   - name: "2. [/etc/profile] umask 설정이 없을 경우 추가"
+     ansible.builtin.lineinfile:
+        path: /etc/profile
+        line: "umask 022\nexport umask"  # 이미지 가이드의 export 문구 포함
+        insertafter: EOF
+     when: not profile_update.changed
+
+    # 2. /etc/login.defs 내 UMASK 설정 수정 (Linux 전용)
+   - name: "3. [/etc/login.defs] UMASK 값 022로 설정"
+     ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^UMASK\s+'
+        line: 'UMASK 022'
+        state: present

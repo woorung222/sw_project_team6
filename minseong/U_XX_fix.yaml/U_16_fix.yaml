@@ -1,0 +1,28 @@
+---
+- name: 주요정보통신기반시설 보안 조치 - U-16 (PATH 환경변수 설정)
+  hosts: all
+  become: yes
+
+  vars:
+  # 예시를 위해 DB에서 받은 데이터를 가정 (실제로는 postgres_query 등으로 받음)
+  # db_result.query_result[0].val 값이 '123'(숫자형 문자열)인지 'abc'(문자열)인지에 따라 분기
+    
+  tasks:
+   # 1. 먼저 /etc/passwd 파일의 상태를 읽어서 변수에 저장해야 합니다.
+   - name: "/etc/passwd 파일 상태 확인"
+     ansible.builtin.stat:
+       path: /etc/passwd
+     register: passwd_stat
+
+   # 2. 확인된 변수(passwd_stat)를 바탕으로 조건부 실행을 합니다.
+   - name: "2. 소유자가 root가 아니거나 권한이 644보다 큰 경우 조치 (Remediation)"
+     ansible.builtin.file:
+       path: /etc/passwd
+       owner: root
+       group: root
+       mode: '0644'
+     # when은 ansible.builtin.file과 같은 라인에 위치해야 합니다.
+     when: >
+        passwd_stat.stat.exists and (
+        passwd_stat.stat.pw_name != 'root' or 
+        passwd_stat.stat.mode | int > 644 )

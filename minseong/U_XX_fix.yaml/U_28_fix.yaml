@@ -1,0 +1,70 @@
+---
+- name: "U-28 접속 IP 및 포트 제한 통합 설정 (KISA 가이드 2026)"
+  hosts: all
+  become: yes
+
+########################### 수 동 점 검 #########################
+
+  vars:
+    # 이미지 가이드 기반 예시 데이터
+    allow_ips: ["192.168.18.129", "192.168.18.180"]
+    allow_port: "22"
+    allow_protocol: "tcp"
+    allow_service: "sshd"
+
+  tasks:
+    # 1. TCP Wrapper 설정 (hosts.deny, hosts.allow)
+    - name: "1-1. 모든 서비스 기본 차단 (hosts.deny)"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts.deny
+        line: "ALL: ALL"
+        create: yes
+
+    - name: "1-2. 특정 IP에 대한 서비스 허용 (hosts.allow)"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts.allow
+        line: "{{ allow_service }}: {{ allow_ips | join(', ') }}"
+        create: yes
+
+    # 2. 시스템 방화벽 서비스 식별 (s를 붙여서 수정)
+    - name: "2. 현재 시스템 방화벽 서비스 확인"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    # 3. Iptables 설정 (변수 참조 방식 수정)
+    - name: "3. [Iptables] 특정 IP 허용 정책 삽입"
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: "{{ allow_protocol }}"
+        destination_port: "{{ allow_port }}"
+        source: "{{ item }}"
+        jump: ACCEPT
+        action: insert
+      loop: "{{ allow_ips }}"
+      # register로 받은 변수에서 직접 services를 찾습니다.
+      when: "'iptables.service' in services_state.services"
+
+    # 4. Firewalld 설정
+    - name: "4. [Firewalld] Rich Rule 추가 및 적용"
+      ansible.posix.firewalld:
+        rich_rule: 'rule family="ipv4" source address="{{ item }}" port port="{{ allow_port }}" protocol="{{ allow_protocol }}" accept'
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop: "{{ allow_ips }}"
+      when: "'firewalld.service' in services_state.services"
+
+    # 5. UFW 설정
+    - name: "5. [UFW] 허용 규칙 추가 및 적용"
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item }}"
+        to_port: "{{ allow_port }}"
+        proto: "{{ allow_protocol }}"
+      loop: "{{ allow_ips }}"
+      when: "'ufw.service' in services_state.services"
+
+  handlers:
+    - name: "Reload UFW"
+      community.general.ufw:
+        state: reloaded

@@ -1,0 +1,51 @@
+---
+- name: "U-20 /etc/xinetd.conf 및 관련 파일 권한 설정"
+  hosts: all
+  become: yes
+  tasks:
+    # 1. /etc/inetd.conf 체크
+    - name: "inetd.conf 파일 정보 확인"
+      ansible.builtin.stat:
+        path: "/etc/inetd.conf"
+      register: inetd_stat
+
+    - name: "inetd.conf 권한 설정"
+      ansible.builtin.file:
+        path: "/etc/inetd.conf"
+        owner: root
+        group: root
+        mode: '0600'
+      # 문법 수정: '=' 대신 '==' 사용, '&&' 대신 'and' 사용
+      when: 
+        - inetd_stat.stat.exists
+
+    # 2. xinetd 관련 설정 체크
+    - name: "xinetd.d 디렉터리 존재 여부 확인"
+      ansible.builtin.stat:
+        path: "/etc/xinetd.d"
+      register: xinetd_dir_stat
+
+    - name: "xinetd 관련 파일 목록 검색"
+      ansible.builtin.find:
+        paths: ["/etc/xinetd.d"]
+        patterns: "*"
+      register: xinetd_files
+      when: xinetd_dir_stat.stat.isdir is defined and xinetd_dir_stat.stat.isdir
+
+    - name: "xinetd.conf 파일 정보 확인"
+      ansible.builtin.stat:
+        path: "/etc/xinetd.conf"
+      register: xinetd_conf_stat
+
+    - name: "xinetd.conf 및 하위 파일 권한 설정"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: '0600'
+        state: file
+      # 검색된 파일 리스트와 단일 파일을 합치되, 실제 존재하는 것만 필터링
+      loop: >-
+        {{ (xinetd_files.files | default([]) | map(attribute='path') | list) + 
+           (['/etc/xinetd.conf'] if xinetd_conf_stat.stat.exists else []) }}
+      when: item is defined

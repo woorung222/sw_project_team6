@@ -1,0 +1,78 @@
+---
+- name: "U-44 tftp, talk, ntalk 서비스 비활성화"
+  hosts: all
+  become: yes
+  vars:
+    target_services:
+      - tftp
+      - talk
+      - ntalk
+
+  tasks:
+    # 0. 사전 정보 수집
+    - name: "0-1. 서비스 정보 수집"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    - name: "0-2. /etc/inetd.conf 파일 존재 확인"
+      ansible.builtin.stat:
+        path: /etc/inetd.conf
+      register: inetd_file
+
+    # 1. [inetd] 환경 조치
+    - name: "1-1. /etc/inetd.conf 파일 수정 (주석 처리)"
+      ansible.builtin.replace:
+        path: /etc/inetd.conf
+        regexp: '^(\s*)(tftp|talk|ntalk)(\s+.*)$'
+        replace: '#\1\2\3'
+      when: inetd_file.stat.exists
+      register: inetd_modify
+
+    - name: "1-2. inetd 서비스 재시작"
+      ansible.builtin.systemd:
+        name: inetd
+        state: restarted
+      when: 
+        - inetd_modify.changed
+        - "'inetd.service' in services_state.ansible_facts.services"
+
+    # 2. [xinetd] 환경 조치
+    - name: "2-1. xinetd 파일 존재 확인"
+      ansible.builtin.stat:
+        path: "/etc/xinetd.d/{{ item }}"
+      loop: "{{ target_services }}"
+      register: xinetd_stats
+
+    - name: "2-2. [xinetd] 설정값 변경: disable = yes"
+      ansible.builtin.lineinfile:
+        path: "/etc/xinetd.d/{{ item.item }}"
+        regexp: '^\s*disable\s*='
+        line: "\tdisable = yes"
+        state: present
+      loop: "{{ xinetd_stats.results }}"
+      when: item.stat.exists
+      register: xinetd_update
+
+    - name: "2-3. xinetd 서비스 재시작"
+      ansible.builtin.systemd:
+        name: xinetd
+        state: restarted
+      # 루프 결과 중 하나라도 변경(changed)되었다면 실행
+      when: 
+        - xinetd_update.results | selectattr('changed', 'defined') | selectattr('changed', 'equalto', true) | list | length > 0
+        - "'xinetd.service' in services_state.ansible_facts.services"
+
+    # 3. [systemd] 환경 조치
+    - name: "3. [systemd] 서비스 중지 및 비활성화"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+        masked: yes
+      loop: "{{ target_services }}"
+      # 서비스가 실제 시스템에 존재할 때만 실행
+      when: "item ~ '.service' in services_state.ansible_facts.services or item in services_state.ansible_facts.services"
+
+    - name: "4. 결과 보고"
+      ansible.builtin.debug:
+        msg: "파일 및 서비스 존재 여부를 확인하여 필요한 보안 조치를 완료했습니다."

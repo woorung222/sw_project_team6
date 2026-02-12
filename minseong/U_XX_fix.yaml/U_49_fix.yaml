@@ -1,0 +1,49 @@
+---
+- name: "U-49 DNS 보안 버전 패치 (BIND)"
+  hosts: all
+  become: yes
+  tasks:
+    # 1. DNS 서비스(named) 활성화 여부 확인 (Step 1)
+    - name: "1. BIND 서비스(named) 상태 확인"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    # 2. DNS 서비스를 사용하지 않는 경우 (조치 방법 기준)
+    - name: "2. [조치] DNS 미사용 시 서비스 중지 및 비활성화 (Step 2)"
+      ansible.builtin.systemd:
+        name: named
+        state: stopped
+        enabled: no
+        masked: yes
+      when: 
+        - "'named.service' in services_state.ansible_facts.services"
+        # 실제 DNS 서버로 운영 중이 아닌 경우에만 중지
+        - "services_state.ansible_facts.services['named.service'].state != 'running'"
+
+    # 3. DNS 서비스 사용 시 버전 확인 및 패치 (Step 3, 4)
+    - name: "3. [점검/보완] BIND 서비스 사용 시 최신 패치 적용"
+      block:
+        - name: "3-1. 현재 BIND 버전 확인 (Step 3)"
+          ansible.builtin.shell: "named -v"
+          register: bind_version
+          changed_when: false
+
+        - name: "3-2. BIND 최신 버전으로 업데이트 (Step 4)"
+          # 가이드의 '주기적으로 패치를 관리하는 경우 양호' 기준 충족
+          ansible.builtin.package:
+            name: bind
+            state: latest
+          register: patch_result
+
+        - name: "3-3. 업데이트 결과 출력"
+          ansible.builtin.debug:
+            msg: "현재 버전: {{ bind_version.stdout }} | 패치 결과: {{ '완료' if patch_result.changed else '이미 최신' }}"
+
+      when: 
+        - "'named.service' in services_state.ansible_facts.services"
+        - "services_state.ansible_facts.services['named.service'].state == 'running'"
+
+    # 4. 최종 리포트
+    - name: "4. 점검 결과 요약"
+      ansible.builtin.debug:
+        msg: "DNS(BIND) 서비스에 대한 보안 패치 및 비활성화 조치를 완료했습니다."

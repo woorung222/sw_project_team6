@@ -1,0 +1,64 @@
+---
+- name: "U-48 expn, vrfy 명령어 제한 설정 (Sendmail, Postfix, Exim)"
+  hosts: all
+  become: yes
+  tasks:
+    # 1. 메일 서비스 활성화 상태 확인
+    - name: "1. 메일 서비스 상태 확인"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    # --- [Sendmail 조치] ---
+    - name: "2. [Sendmail] PrivacyOptions 설정 (Step 1, 2)"
+      block:
+        - name: "sendmail.cf 파일 내 goaway 또는 noexpn, novrfy 설정 추가"
+          ansible.builtin.replace:
+            path: /etc/mail/sendmail.cf
+            regexp: '^O\s+PrivacyOptions=(.*)'
+            # 이미지 가이드의 goaway 옵션을 사용하여 통합 단축 설정 적용
+            replace: 'O PrivacyOptions=restrictqrun, goaway'
+          register: sendmail_update
+
+        - name: "Sendmail 서비스 재시작 (Step 3)"
+          ansible.builtin.systemd:
+            name: sendmail
+            state: restarted
+          when: sendmail_update.changed
+      when: "'sendmail.service' in services_state.ansible_facts.services"
+
+    # --- [Postfix 조치] ---
+    - name: "3. [Postfix] vrfy 명령어 비활성화 (Step 1, 2)"
+      block:
+        - name: "main.cf 내 disable_vrfy_command 설정 (yes)"
+          ansible.builtin.lineinfile:
+            path: /etc/postfix/main.cf
+            regexp: '^disable_vrfy_command\s*='
+            line: "disable_vrfy_command = yes"
+            state: present
+          register: postfix_update
+
+        - name: "Postfix 설정 적용 (Step 3)"
+          ansible.builtin.shell: "postfix reload"
+          when: postfix_update.changed
+      when: "'postfix.service' in services_state.ansible_facts.services"
+
+    # --- [Exim 조치] ---
+    - name: "4. [Exim] vrfy, expn 설정 제거 (Step 1, 2)"
+      block:
+        - name: "Exim 설정 파일 내 vrfy/expn 허용 설정 주석 처리"
+          ansible.builtin.replace:
+            path: "{{ item }}"
+            regexp: '^(acl_smtp_(vrfy|expn)\s*=\s*accept)'
+            replace: '# \1'
+          loop:
+            - /etc/exim/exim.conf
+            - /etc/exim4/exim4.conf
+          register: exim_update
+          ignore_errors: yes
+
+        - name: "Exim 서비스 재시작 (Step 3)"
+          ansible.builtin.systemd:
+            name: "{{ 'exim4' if 'exim4.service' in services_state.ansible_facts.services else 'exim' }}"
+            state: restarted
+          when: exim_update.changed
+      when: "'exim.service' in services_state.ansible_facts.services or 'exim4.service' in services_state.ansible_facts.services"
