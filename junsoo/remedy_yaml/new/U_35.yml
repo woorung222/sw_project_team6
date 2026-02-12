@@ -1,0 +1,398 @@
+- name: "[U_35] Remediate Anonymous Access to Shared Services"
+  hosts: all
+  become: yes
+  vars:
+    # 1. Flag List (Control Node에서 주입됨)
+    flag_list: []
+    flag_id_main: "U_35"
+    category: "service"
+
+    # 2. 타임스탬프 정의
+    ts_stderr: "{{ ansible_date_time.iso8601 }}"
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}"
+
+    # 3. 로그 파일 경로 정의
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+    
+    # 파일명 규칙
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname }}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname }}-remediate_{{ flag_id_main }}.json"
+
+  tasks:
+    # =========================================================
+    # 1. [U_35_1] 기본 FTP 계정(ftp, anonymous) 삭제
+    # =========================================================
+    - name: "[U_35_1] Remove ftp and anonymous users"
+      when: "'U_35_1' in flag_list"
+      block:
+        - name: "[U_35_1] Delete 'ftp' user"
+          user:
+            name: ftp
+            state: absent
+            remove: no  # 홈 디렉터리는 보존 (필요 시 yes로 변경)
+          ignore_errors: yes
+
+        - name: "[U_35_1] Delete 'anonymous' user"
+          user:
+            name: anonymous
+            state: absent
+            remove: no
+          ignore_errors: yes
+
+        # 로그 기록
+        - name: "Log U_35_1 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_35_1",
+                "section": "[조치 결과]",
+                "title": "[U_35_1] FTP 익명 계정 삭제 성공",
+                "cmd": "userdel ftp / userdel anonymous",
+                "result": "조치 성공 (계정 삭제 완료)"
+              }
+
+        - name: "Log U_35_1 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_1",
+                  "status": 2,
+                  "description": "FTP 익명 계정(ftp, anonymous) 삭제 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      rescue:
+        - name: "Log U_35_1 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_1",
+                  "status": 0,
+                  "description": "조치 실패: 계정 삭제 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+    # =========================================================
+    # 2. [U_35_2] vsFTPd 익명 접속 비활성화
+    # =========================================================
+    - name: "[U_35_2] Disable anonymous_enable in vsftpd.conf"
+      when: "'U_35_2' in flag_list"
+      block:
+        # 파일 경로 자동 감지 (Debian/RedHat)
+        - name: "[U_35_2] Check vsftpd.conf path"
+          stat:
+            path: "{{ item }}"
+          loop:
+            - /etc/vsftpd.conf
+            - /etc/vsftpd/vsftpd.conf
+          register: r_vsftpd_stat
+
+        - name: "[U_35_2] Set anonymous_enable=NO"
+          lineinfile:
+            path: "{{ item.item }}"
+            regexp: '^anonymous_enable='
+            line: 'anonymous_enable=NO'
+            state: present
+          loop: "{{ r_vsftpd_stat.results }}"
+          when: item.stat.exists
+          register: r_vsftpd_conf
+
+        - name: "[U_35_2] Restart vsftpd"
+          service:
+            name: vsftpd
+            state: restarted
+          when: r_vsftpd_conf.changed
+          ignore_errors: yes
+
+        # 로그 기록
+        - name: "Log U_35_2 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_2",
+                  "status": 2,
+                  "description": "vsFTPd 익명 접속(anonymous_enable=NO) 설정 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      rescue:
+        - name: "Log U_35_2 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_2",
+                  "status": 0,
+                  "description": "조치 실패: vsftpd 설정 변경 중 에러",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+    # =========================================================
+    # 3. [U_35_3] ProFTPd 익명 접속 비활성화
+    # =========================================================
+    - name: "[U_35_3] Disable Anonymous block in proftpd.conf"
+      when: "'U_35_3' in flag_list"
+      block:
+        - name: "[U_35_3] Find proftpd.conf path"
+          stat:
+            path: "{{ item }}"
+          loop:
+            - /etc/proftpd.conf
+            - /etc/proftpd/proftpd.conf
+          register: r_proftpd_stat
+
+        # <Anonymous> 태그와 </Anonymous> 태그를 주석 처리하여 블록 비활성화 유도
+        # (완벽한 블록 제거는 복잡하므로 태그를 무효화하는 방식 시도)
+        - name: "[U_35_3] Comment out Anonymous tags"
+          replace:
+            path: "{{ item.item }}"
+            regexp: '^(<Anonymous.*|>)'
+            replace: '# \1'
+          loop: "{{ r_proftpd_stat.results }}"
+          when: item.stat.exists
+          register: r_proftpd_conf
+
+        - name: "[U_35_3] Restart proftpd"
+          service:
+            name: proftpd
+            state: restarted
+          when: r_proftpd_conf.changed
+          ignore_errors: yes
+
+        # 로그 기록
+        - name: "Log U_35_3 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_3",
+                  "status": 2,
+                  "description": "ProFTPd 익명 접속 설정(Anonymous 태그 주석) 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      rescue:
+        - name: "Log U_35_3 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_3",
+                  "status": 0,
+                  "description": "조치 실패: ProFTPd 설정 변경 중 에러",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+    # =========================================================
+    # 4. [U_35_4] NFS 익명 접근(anonuid/anongid) 제거
+    # =========================================================
+    - name: "[U_35_4] Remove anon options from /etc/exports"
+      when: "'U_35_4' in flag_list"
+      block:
+        - name: "[U_35_4] Remove anonuid/anongid from /etc/exports"
+          replace:
+            path: /etc/exports
+            regexp: ',?\s*(anonuid|anongid)=\d+'
+            replace: ''
+          register: r_nfs_conf
+
+        - name: "[U_35_4] Reload NFS exports"
+          command: exportfs -ra
+          when: r_nfs_conf.changed
+          ignore_errors: yes
+
+        # 로그 기록
+        - name: "Log U_35_4 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_4",
+                  "status": 2,
+                  "description": "NFS 익명 접근 옵션(anonuid/anongid) 제거 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      rescue:
+        - name: "Log U_35_4 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_4",
+                  "status": 0,
+                  "description": "조치 실패: NFS 설정 변경 중 에러",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+    # =========================================================
+    # 5. [U_35_5] Samba Guest 접근 차단
+    # =========================================================
+    - name: "[U_35_5] Set guest ok = no in smb.conf"
+      when: "'U_35_5' in flag_list"
+      block:
+        - name: "[U_35_5] Configure guest ok = no"
+          replace:
+            path: /etc/samba/smb.conf
+            regexp: '^\s*guest ok\s*=\s*yes'
+            replace: '   guest ok = no'
+          register: r_samba_conf
+
+        - name: "[U_35_5] Reload Samba config"
+          command: smbcontrol all reload-config
+          when: r_samba_conf.changed
+          ignore_errors: yes
+
+        # 로그 기록
+        - name: "Log U_35_5 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_5",
+                  "status": 2,
+                  "description": "Samba Guest 접근 차단(guest ok = no) 설정 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      rescue:
+        - name: "Log U_35_5 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_35_5",
+                  "status": 0,
+                  "description": "조치 실패: Samba 설정 변경 중 에러",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }

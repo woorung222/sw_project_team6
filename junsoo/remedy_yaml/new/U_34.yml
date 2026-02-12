@@ -1,0 +1,338 @@
+- name: "[U_34] Remediate Finger Service"
+  hosts: all
+  become: yes
+  vars:
+    # 1. Flag List (Control Node에서 주입됨)
+    flag_list: []
+    flag_id_main: "U_34"
+    category: "service"
+
+    # 2. 타임스탬프 정의
+    ts_stderr: "{{ ansible_date_time.iso8601 }}"
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}"
+
+    # 3. 로그 파일 경로 정의
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+    
+    # 파일명 규칙
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname }}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname }}-remediate_{{ flag_id_main }}.json"
+
+  tasks:
+    # =========================================================
+    # 1. [U_34_1] inetd.conf 설정 조치
+    # =========================================================
+    - name: "[U_34_1] Comment out finger in /etc/inetd.conf"
+      when: "'U_34_1' in flag_list"
+      block:
+        # 1-1. 설정 파일 수정 (주석 처리)
+        - name: "[U_34_1] Remediate inetd.conf for finger"
+          replace:
+            path: /etc/inetd.conf
+            regexp: '^([[:space:]]*finger[[:space:]].*)$'
+            replace: '# \1'
+          register: r_inetd_finger
+
+        # 1-2. inetd 서비스 재시작 (변경 시)
+        - name: "[U_34_1] Restart inetd service"
+          service:
+            name: inetd
+            state: restarted
+          when: r_inetd_finger.changed
+          ignore_errors: yes
+
+        # 1-3. [Control Node] 로그 기록
+        - name: "Log U_34_1 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_34_1",
+                "section": "[조치 결과]",
+                "title": "[U_34_1] inetd.conf 내 Finger 서비스 비활성화 성공",
+                "cmd": "Comment out finger in /etc/inetd.conf",
+                "result": "조치 성공 (status: 2)"
+              }
+
+        # 1-4. [Control Node] JSON 기록
+        - name: "Log U_34_1 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_34_1",
+                  "status": 2,
+                  "description": "inetd.conf 파일 내 Finger 서비스 주석 처리 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_34_1 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_34_1",
+                  "status": 0,
+                  "description": "조치 실패: inetd.conf 수정 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_34_1 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_34_1",
+                "section": "[조치 결과]",
+                "title": "[U_34_1] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - 파일 존재 여부 등 확인 필요"
+              }
+
+
+    # =========================================================
+    # 2. [U_34_2] xinetd.d/finger 설정 조치
+    # =========================================================
+    - name: "[U_34_2] Disable finger in /etc/xinetd.d/finger"
+      when: "'U_34_2' in flag_list"
+      block:
+        # 2-1. 설정 파일 수정 (disable = yes)
+        - name: "[U_34_2] Remediate xinetd finger config"
+          lineinfile:
+            path: /etc/xinetd.d/finger
+            regexp: '^[[:space:]]*disable[[:space:]]*='
+            line: '        disable = yes'
+            state: present
+          register: r_xinetd_finger
+
+        # 2-2. xinetd 서비스 재시작
+        - name: "[U_34_2] Restart xinetd service"
+          service:
+            name: xinetd
+            state: restarted
+          when: r_xinetd_finger.changed
+          ignore_errors: yes
+
+        # 2-3. [Control Node] 로그 기록
+        - name: "Log U_34_2 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_34_2",
+                "section": "[조치 결과]",
+                "title": "[U_34_2] xinetd Finger 서비스 비활성화 성공",
+                "cmd": "Update /etc/xinetd.d/finger (disable = yes)",
+                "result": "조치 성공 (status: 2)"
+              }
+
+        # 2-4. [Control Node] JSON 기록
+        - name: "Log U_34_2 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_34_2",
+                  "status": 2,
+                  "description": "xinetd Finger 설정 변경(disable=yes) 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_34_2 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_34_2",
+                  "status": 0,
+                  "description": "조치 실패: xinetd 설정 파일 수정 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_34_2 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_34_2",
+                "section": "[조치 결과]",
+                "title": "[U_34_2] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - 파일 존재 여부 확인 필요"
+              }
+
+
+    # =========================================================
+    # 3. [U_34_3] Systemd 서비스 중지 (진단 스크립트 대응)
+    # =========================================================
+    - name: "[U_34_3] Stop Finger Systemd Service"
+      when: "'U_34_3' in flag_list"
+      block:
+        # 3-1. 서비스 중지 및 비활성화 (finger, fingerd)
+        - name: "[U_34_3] Stop finger services"
+          service:
+            name: "{{ item }}"
+            state: stopped
+            enabled: no
+          loop:
+            - finger
+            - fingerd
+            - finger.socket
+          ignore_errors: yes
+
+        # 3-2. [Control Node] 로그 기록
+        - name: "Log U_34_3 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_34_3",
+                "section": "[조치 결과]",
+                "title": "[U_34_3] Finger Systemd 서비스 중지 성공",
+                "cmd": "systemctl stop/disable finger & fingerd",
+                "result": "조치 성공 (status: 2)"
+              }
+
+        # 3-3. [Control Node] JSON 기록
+        - name: "Log U_34_3 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_34_3",
+                  "status": 2,
+                  "description": "Finger Systemd 서비스 중지 및 비활성화 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_34_3 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_34_3",
+                  "status": 0,
+                  "description": "조치 실패: 서비스 중지 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_34_3 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_34_3",
+                "section": "[조치 결과]",
+                "title": "[U_34_3] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
+              }
