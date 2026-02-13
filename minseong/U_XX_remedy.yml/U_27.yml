@@ -1,0 +1,120 @@
+---
+- name: "U-27 $HOME/.rhosts, hosts.equiv 사용 금지 및 설정 점검"
+  hosts: all
+  become: yes
+  vars:
+   file: "file"
+   flag_list: U_27_1
+   ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+   ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+   STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+
+   log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+   json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: ubuntu24-remediate_U-54.log / .json
+   my_log_file: "{{ log_dir }}/ubuntu24-remediate_{{ flag_list }}.log"
+   my_json_file: "{{ json_dir }}/ubuntu24-remediate_{{ flag_list }}.json"
+  tasks: 
+    - name: "시스템 내 모든 사용자의 홈 디렉터리 및 계정 정보 수집"
+      ansible.builtin.getent:
+        database: passwd
+
+    - name: "점검 대상 파일 목록 생성 (/etc/hosts.equiv 및 모든 사용자의 .rhosts)"
+      ansible.builtin.set_fact:
+        rhost_files: >-
+          {{
+            ['/etc/hosts.equiv'] +
+            (getent_passwd.values() | map(attribute=4) | map('regex_replace', '$', '/.rhosts') | list)
+          }}
+
+    - name: "대상 파일 정보 확인 (존재 여부, 소유자, 권한)"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ rhost_files }}"
+      register: rhost_stats
+
+    - name: "소유자 변경, 권한 설정 및 '+' 설정 제거"
+      block:
+        - name: "소유자 root(또는 해당 계정) 및 권한 600 설정"
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            owner: "root"  # 기본적으로 root로 설정하거나 필요시 해당 사용자로 변경
+            mode: '0600'
+          loop: "{{ rhost_stats.results }}"
+          when: item.stat.exists
+
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+             {
+              "ts": ts_stderr,
+              "flag_id": "U_27_1",
+              "section": "[조치 내용]",
+              "title": "[U_27_1] (소유자 root(또는 해당 계정) 및 권한 600 설정)",
+              "cmd": " chown <root 또는 해당 계정> /etc/hosts.equiv, chmod 600 /etc/hosts.equiv ",
+              "result": "조치 성공 (소유자 root(또는 해당 계정) 및 권한 600 설정)"
+             } | to_json
+            }}
+          when: "'U_27_1' in flag_list" 
+
+        - name: "파일 내 '+' 설정(모든 호스트/계정 신뢰) 제거"
+          ansible.builtin.replace:
+            path: "{{ item.item }}"
+            regexp: '^\s*\+\s*.*$'
+            replace: ''
+          loop: "{{ rhost_stats.results }}"
+          when: item.stat.exists
+
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+             {
+              "ts": ts_stderr,
+              "flag_id": "U_27_1",
+              "section": "[조치 내용]",
+              "title": "[U_27_1] (파일 내 '+' 설정(모든 호스트/계정 신뢰) 제거)",
+              "cmd": " sudo sed -i '/+/d' <파일>  ",
+              "result": "조치 성공 (파일 내 '+' 설정(모든 호스트/계정 신뢰) 제거)"
+             } | to_json
+            }}
+          when: "'U_27_1' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_27_1",
+              "status": 2, 
+              "description": "소유자 변경, 권한 설정 및 '+' 설정 제거 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } | to_json
+        }}
+      changed_when: false
+      when: "'U_27_1' in flag_list"

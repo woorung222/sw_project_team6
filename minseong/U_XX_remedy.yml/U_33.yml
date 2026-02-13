@@ -1,0 +1,88 @@
+---
+- name: "U-33 숨겨진 파일 및 디렉토리 검색 및 점검"
+  hosts: all
+  become: yes
+  vars:
+   flag_list: [ ]
+   ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+   ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+   STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+   file: "file"
+   log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+   json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: ubuntu24-remediate_U-54.log / .json
+   my_log_file: "{{ log_dir }}/ubuntu24-remediate_{{ flag_list }}.log"
+   my_json_file: "{{ json_dir }}/ubuntu24-remediate_{{ flag_list }}.json"
+  tasks:
+    - name: "숨겨진 파일 검색 (Step 2: find -type f -name '.*')"
+      # 이미지 가이드의 find 명령어를 사용하여 루트(/)부터 숨겨진 파일을 찾습니다.
+      # 시스템 부하 방지를 위해 -xdev 옵션과 주요 시스템 디렉토리 제외를 권장합니다.
+      ansible.builtin.shell: |
+        find / -type f -name ".*" -xdev -ls 2>/dev/null | grep -vE '/(proc|sys|run|dev|var/lib/docker)/'
+      register: hidden_files
+      changed_when: false
+
+    - name: "숨겨진 디렉토리 검색 (Step 2: find -type d -name '.*')"
+      # 이미지 가이드의 find 명령어를 사용하여 숨겨진 디렉토리를 찾습니다.
+      ansible.builtin.shell: |
+        find / -type d -name ".*" -xdev -ls 2>/dev/null | grep -vE '/(proc|sys|run|dev|var/lib/docker)/'
+      register: hidden_dirs
+      changed_when: false
+
+    - name: "불필요하거나 의심스러운 항목 제거 "
+      # 가이드 조치 사례: # rm <파일 이름>, # rm -r <디렉토리 이름>
+      # 실제 운영 환경에서는 필수 설정 파일(.bashrc 등)이 삭제되지 않도록 주의가 필요하여 예시로만 작성합니다.
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/.hidden_malicious_file" # 예시: 삭제가 필요한 의심 파일 경로
+      when: false  # 안전을 위해 기본적으로 실행되지 않도록 설정
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_33_1",
+          "section": "[조치 내용]",
+          "title": "[U_33_1] (불필요하거나 의심스러운 숨겨진 파일 및 디렉토리 제거)",
+          "cmd": " rm <파일 이름>, rm -r <디렉토리 이름>",
+          "result": "조치 성공 (불필요하거나 의심스러운 숨겨진 파일 및 디렉토리 제거)"
+         } | to_json
+        }}
+      when: "'U_33_1' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+        path: "{{ my_json_file }}"     # [필수] vars에 선언한 로그 파일 경로
+        create: yes                   # [옵션] 파일 없으면 생성
+        mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+        line: >-
+         {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_33_1",
+              "status": 2, 
+              "description": "불필요하거나 의심스러운 숨겨진 파일 및 디렉토리 제거 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } | to_json
+         }}
+      changed_when: false
+      when: "'U_33_1' in flag_list"
