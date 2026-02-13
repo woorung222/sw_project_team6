@@ -1,51 +1,59 @@
-#!/usr/bin/bash 
-##### [U-23] SUID, SGID, Sticky bit 설정 파일 점검
-####### 점검내용: 불필요하거나 악의적인 파일에 SUID, SGID, Sticky bit 설정 여부 점검
-####### 기준: 주요정보통신기반시설 기술적 취약점 분석·평가 방법 상세가이드 (2026)
-####### 대상: Ubuntu
-####### 자동 조치 가능 유무 : 
-####### 자동 조치 불가능 사유 : 
-####### [취약 조건] : 주요 실행 파일의 권한에 SUID와 SGID에 대한 설정이 부여된 경우
+#!/usr/bin/env bash
+set -u
 
-#---
-HOSTNAME=$(hostname)
-IP=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-DATE=$(date "+%Y_%m_%d / %H:%M:%S")
-resultfile="Results_$(date '+%F').txt"
-IS_VUL=0
+# =========================================================
+# U_23 (상) SUID, SGID, Sticky bit 설정 파일 점검 | Ubuntu 24.04
+# - 진단 기준: 불필요한 주요 파일에 SUID/SGID 설정 여부 점검
+# - DB 정합성: IS_AUTO=0 (애플리케이션 오동작 위험으로 수동 조치)
+# =========================================================
+
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
+
+FLAG_ID="U_23"
+CATEGORY="file"
+IS_AUTO=0
+
 U_23_1=0
 
+# Ubuntu 환경에 맞춘 점검 대상 파일 리스트
+CHECK_LIST=(
+    "/sbin/dump" "/sbin/restore"
+    "/usr/bin/at"
+    "/usr/bin/lpq" "/usr/bin/lpr" "/usr/bin/lprm"
+    "/usr/sbin/lpc" "/usr/bin/newgrp"
+    "/usr/bin/traceroute"
+)
 
-executables=("/sbin/dump" "/sbin/restore" "/sbin/unix_chkpwd" "/usr/bin/at" "/usr/bin/lpq" "/usr/bin/lpq-lpd" "/usr/bin/lpr" "/usr/bin/lpr-lpd" "/usr/bin/lprm" "/usr/bin/lprm-lpd" "/usr/bin/newgrp" "/usr/sbin/lpc" "/usr/sbin/lpc-lpd" "/usr/sbin/traceroute")
-	for ((i=0; i<${#executables[@]}; i++))
-	do
-		if [ -f ${executables[$i]} ]; then
-			if [ `ls -l ${executables[$i]} | awk '{print substr($1,2,9)}' | grep -i 's' | wc -l` -gt 0 ]; then
-				#echo "※ U-23 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-				#echo " 주요 실행 파일의 권한에 SUID나 SGID에 대한 설정이 부여되어 있습니다." >> $resultfile 2>&1
-				 U_23_1=1
+for target in "${CHECK_LIST[@]}"; do
+    if [ -f "$target" ]; then
+        # stat으로 특수 권한(4000, 2000) 존재 여부 확인
+        # %a의 4번째 자리(있을 경우) 또는 8진수 계산
+        PERM=$(stat -c "%a" "$target")
+        # 4자리 권한 중 첫 자리가 2(SGID), 4(SUID), 6(둘다) 인지 확인
+        if [ ${#PERM} -eq 4 ]; then
+            FIRST_DIGIT=${PERM:0:1}
+            if [[ "$FIRST_DIGIT" =~ [246] ]]; then
+                U_23_1=1
+                break
+            fi
+        fi
+    fi
+done
 
-			fi
-		fi
-	done
-  IS_VUL=$U_23_1
-	#echo "※ U-23 결과 : 양호(Good)" >> $resultfile 2>&1
-	 	cat <<EOF
+IS_VUL=$U_23_1
+
+cat <<EOF
 {
-  "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP",
-    "user": "$USER"
-  },
+  "meta": { "hostname": "$HOST", "ip": "$IP", "user": "$USER" },
   "result": {
-    "flag_id": "U-23",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "file",
-    "flag": {
-      "U_23_1": $U_23_1,
-    },
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
+    "flag": { "U_23_1": $U_23_1 },
     "timestamp": "$DATE"
   }
 }

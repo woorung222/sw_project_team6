@@ -1,79 +1,56 @@
-#!/usr/bin/bash 
-##### [U-21] /etc/(r)syslog.conf 파일 소유자 및 권한 설정
-####### 점검내용: /etc/(r)syslog.conf 파일 권한 적절성 여부 점검
-####### 기준: 주요정보통신기반시설 기술적 취약점 분석·평가 방법 상세가이드 (2026)
-####### 대상: Ubuntu
-####### 자동 조치 가능 유무 : 
-####### 자동 조치 불가능 사유 : 
-####### [취약 조건] :/etc/(r)syslog.conf 파일의 소유자가 root(또는 bin, sys)가 아니거나, 권한이 640 이하가 아닌 경우
+#!/usr/bin/env bash
+set -u
 
-#---
-HOSTNAME=$(hostname)
-IP=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-DATE=$(date "+%Y_%m_%d / %H:%M:%S")
-resultfile="Results_$(date '+%F').txt"
+# =========================================================
+# U_21 (상) /etc/(r)syslog.conf 파일 소유자 및 권한 설정 | Ubuntu 24.04
+# - 진단 기준: 소유자 root(bin, sys), 권한 640 이하
+# =========================================================
+
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
+
+FLAG_ID="U_21"
+CATEGORY="file"
+IS_AUTO=1
+
+U_21_1=0 # syslog.conf
+U_21_2=0 # rsyslog.conf
+
+check_perm() {
+    local target=$1
+    if [ -f "$target" ]; then
+        local owner=$(stat -c "%U" "$target")
+        local perm=$(stat -c "%a" "$target")
+        if [[ "$owner" =~ ^(root|bin|sys)$ ]] && [ "$perm" -le 640 ]; then
+            echo 0
+        else
+            echo 1
+        fi
+    else
+        echo 0
+    fi
+}
+
+U_21_1=$(check_perm "/etc/syslog.conf")
+U_21_2=$(check_perm "/etc/rsyslog.conf")
+
+# syslog-ng.conf 등 추가 파일이 있다면 U_21_1 또는 U_21_2에 합산 가능
+[ -f "/etc/syslog-ng.conf" ] && [ "$(check_perm "/etc/syslog-ng.conf")" -eq 1 ] && U_21_1=1
+
 IS_VUL=0
-U_21_1=0
+[ "$U_21_1" -eq 1 ] || [ "$U_21_2" -eq 1 ] && IS_VUL=1
 
-syslogconf_files=("/etc/rsyslog.conf" "/etc/syslog.conf" "/etc/syslog-ng.conf")
-	file_exists_count=0
-	for ((i=0; i<${#syslogconf_files[@]}; i++))
-	do
-		if [ -f ${syslogconf_files[$i]} ]; then
-			((file_exists_count++))
-			syslogconf_file_owner_name=`ls -l ${syslogconf_files[$i]} | awk '{print $3}'`
-			if [[ $syslogconf_file_owner_name =~ root ]] || [[ $syslogconf_file_owner_name =~ bin ]] || [[ $syslogconf_file_owner_name =~ sys ]]; then
-				syslogconf_file_permission=`stat ${syslogconf_files[$i]} | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,3,3)}'`
-				if [ $syslogconf_file_permission -le 640 ]; then
-					syslogconf_file_owner_permission=`stat ${syslogconf_files[$i]} | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,3,1)}'`
-					if [ $syslogconf_file_owner_permission -eq 6 ] || [ $syslogconf_file_owner_permission -eq 4 ] || [ $syslogconf_file_owner_permission -eq 2 ] || [ $syslogconf_file_owner_permission -eq 0 ]; then
-						syslogconf_file_group_permission=`stat ${syslogconf_files[$i]} | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,4,1)}'`
-						if [ $syslogconf_file_group_permission -eq 4 ] || [ $syslogconf_file_group_permission -eq 2 ] || [ $syslogconf_file_group_permission -eq 0 ]; then
-							syslogconf_file_other_permission=`stat ${syslogconf_files[$i]} | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,5,1)}'`
-							if [ $syslogconf_file_other_permission -ne 0 ]; then
-								#echo "※ U-21 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-								#echo " ${syslogconf_files[$i]} 파일의 다른 사용자(other)에 대한 권한이 취약합니다." >> $resultfile 2>&1
-								 U_21_1=1
-							fi
-						else
-							#echo "※ U-21 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-							#echo " ${syslogconf_files[$i]} 파일의 그룹 사용자(group)에 대한 권한이 취약합니다." >> $resultfile 2>&1
-							 U_21_1=1
-						fi
-					else
-						#echo "※ U-21 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-						#echo " ${syslogconf_files[$i]} 파일의 사용자(owner)에 대한 권한이 취약합니다." >> $resultfile 2>&1
-						 U_21_1=1
-					fi
-				else
-					#echo "※ U-21 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-					#echo " ${syslogconf_files[$i]} 파일의 권한이 640보다 큽니다." >> $resultfile 2>&1
-					 U_21_1=1
-				fi
-			else
-				#echo "※ U-21 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-				#echo " ${syslogconf_files[$i]} 파일의 소유자(owner)가 root(또는 bin, sys)가 아닙니다." >> $resultfile 2>&1
-				 U_21_1=1
-			fi
-		fi
-	done
-	IS_VUL=$U_21_1
-		cat <<EOF
+cat <<EOF
 {
-  "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP",
-    "user": "$USER"
-  },
+  "meta": { "hostname": "$HOST", "ip": "$IP", "user": "$USER" },
   "result": {
-    "flag_id": "U-21",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "file",
-    "flag": {
-      "U_21_1": $U_21_1,
-    },
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
+    "flag": { "U_21_1": $U_21_1, "U_21_2": $U_21_2 },
     "timestamp": "$DATE"
   }
 }

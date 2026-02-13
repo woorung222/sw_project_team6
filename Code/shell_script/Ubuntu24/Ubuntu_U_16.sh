@@ -1,84 +1,66 @@
-#!/usr/bin/bash 
-##### [U-16] /etc/passwd 파일 소유자 및 권한 설정
-####### 점검내용: /etc/passwd 파일 권한 적절성 여부 점검
-####### 기준: 주요정보통신기반시설 기술적 취약점 분석·평가 방법 상세가이드 (2026)
-####### 대상: Ubuntu
-####### 자동 조치 가능 유무 : 
-####### 자동 조치 불가능 사유 : 
-####### [취약 조건] : /etc/passwd 파일의 소유자가 root가 아니거나, 권한이 644 이하가 아닌 경우
+#!/usr/bin/env bash
+set -u
 
-#---
-HOSTNAME=$(hostname)
-IP=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-DATE=$(date "+%Y_%m_%d / %H:%M:%S")
-resultfile="Results_$(date '+%F').txt"
-IS_VUL=0
-U_16_1=0
+# =========================================================
+# U_16 (상) /etc/passwd 파일 소유자 및 권한 설정 | Ubuntu 24.04
+# - 진단 기준: 소유자가 root이고, 권한이 644 이하인 경우 양호
+# - DB 정합성: IS_AUTO=0 (수동 조치 권장)
+# =========================================================
 
-if [ -f /etc/passwd ]; then		
-		OWNER_NAME=`ls -l /etc/passwd | awk '{print $3}'`
-		if [[ $OWNER_NAME =~ root ]]; then
-			PASSWD_PERMISSION=`stat /etc/passwd | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,3,3)}'`
-			if [ $PASSWD_PERMISSION -le 644 ]; then
-				OWNER_PERMISSION=`stat /etc/passwd | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,3,1)}'`
-				if [ $OWNER_PERMISSION -eq 0 ] || [ $OWNER_PERMISSION -eq 2 ] || [ $OWNER_PERMISSION -eq 4 ] || [ $OWNER_PERMISSION -eq 6 ]; then
-					GROUP_PERMISSION=`stat /etc/passwd | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,4,1)}'`
-					if [ $GROUP_PERMISSION -eq 0 ] || [ $GROUP_PERMISSION -eq 4 ]; then
-						OTHER_PERMISSION=`stat /etc/passwd | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,5,1)}'`
-						if [ $OTHER_PERMISSION -eq 0 ] || [ $OTHER_PERMISSION -eq 4 ]; then
-							##echo "※ U-16 결과 : 양호(Good)" >> $resultfile 2>&1
-							U_16_1=0
-						else
-							#echo "※ U-16 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-							#echo " /etc/passwd 파일의 다른 사용자(other)에 대한 권한이 취약합니다." >> $resultfile 2>&1
-							U_16_1=1
-						fi
-					else
-						#echo "※ U-16 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-						#echo " /etc/passwd 파일의 그룹 사용자(group)에 대한 권한이 취약합니다." >> $resultfile 2>&1
-						U_16_1=1
-						
-					fi
-				else
-					#echo "※ U-16 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-					#echo " /etc/passwd 파일의 사용자(owner)에 대한 권한이 취약합니다." >> $resultfile 2>&1
-					U_16_1=1
-					
-				fi
-			else
-				#echo "※ U-16 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-				#echo " /etc/passwd 파일의 권한이 644보다 큽니다." >> $resultfile 2>&1
-				U_16_1=1
-				
-			fi
-		else
-			#echo "※ U-16 결과 : 취약(Vulnerable)" >> $resultfile 2>&1
-			#echo " /etc/passwd 파일의 소유자(owner)가 root가 아닙니다." >> $resultfile 2>&1
-			U_16_1=1
-			
-		fi
-	else
-		#echo "※ U-16 결과 : N/A" >> $resultfile 2>&1
-		#echo " /etc/passwd 파일이 없습니다." >> $resultfile 2>&1
-		U_16_1=1
-	fi
-		IS_VUL=$U_16_1
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
 
-	cat <<EOF
+FLAG_ID="U_16"
+CATEGORY="file"
+IS_AUTO=0
+
+# -------------------------
+# Flag (0: 양호, 1: 취약)
+# -------------------------
+FLAG_U_16_1=0
+
+TARGET_FILE="/etc/passwd"
+
+# -------------------------
+# 1) 파일 존재 여부 및 소유자/권한 점검
+# -------------------------
+if [ -f "$TARGET_FILE" ]; then
+    # 소유자 및 권한(숫자) 추출
+    OWNER=$(stat -c "%U" "$TARGET_FILE")
+    PERM=$(stat -c "%a" "$TARGET_FILE")
+
+    # 진단 로직: 소유자 root && 권한 644 이하
+    if [ "$OWNER" = "root" ] && [ "$PERM" -le 644 ]; then
+        FLAG_U_16_1=0
+    else
+        FLAG_U_16_1=1
+    fi
+else
+    # 파일이 없는 경우 (이론적으로 불가능하나 보안상 양호 처리하지 않음)
+    FLAG_U_16_1=1
+fi
+
+# -------------------------
+# 2) Output (JSON)
+# -------------------------
+IS_VUL=$FLAG_U_16_1
+
+cat <<EOF
 {
   "meta": {
-    "hostname": "$HOSTNAME",
+    "hostname": "$HOST",
     "ip": "$IP",
     "user": "$USER"
   },
   "result": {
-    "flag_id": "U-16",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "file",
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
     "flag": {
-      "U_16_1": $U_16_1,
+      "U_16_1": $FLAG_U_16_1
     },
     "timestamp": "$DATE"
   }

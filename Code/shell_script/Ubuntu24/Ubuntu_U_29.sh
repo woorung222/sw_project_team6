@@ -21,7 +21,7 @@ if [ -f /etc/hosts.lpd ]; then
 		etc_hostslpd_owner_name=`ls -l /etc/hosts.lpd | awk '{print $3}'`
 		if [[ $etc_hostslpd_owner_name =~ root ]]; then
 			etc_hostslpd_permission=`stat /etc/hosts.lpd | grep -i 'Uid' | awk '{print $2}' | awk -F / '{print substr($1,3,3)}'`
-			if [ $etc_hostslpd_permission -eq 600 ]; then
+			if [ $etc_hostslpd_permission -le 600 ]; then
 				#echo "※ U-29 결과 : 양호(Good)" >> $resultfile 2>&1
 				 U_29_1=0
 			else

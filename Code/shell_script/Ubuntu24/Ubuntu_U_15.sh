@@ -1,45 +1,58 @@
-#!/usr/bin/bash 
-##### [U-15]파일 및 디렉터리 소유자 설정
-####### 점검내용: 소유자가 존재하지 않는 파일 및 디렉터리의 존재 여부 점검
-####### 기준: 주요정보통신기반시설 기술적 취약점 분석·평가 방법 상세가이드 (2026)
-####### 대상: Ubuntu
-####### 자동 조치 가능 유무 : 
-####### 자동 조치 불가능 사유 : 
-####### [취약 조건] : 소유자가 존재하지 않는 파일 및 디렉터리가 존재하는 경우
+#!/usr/bin/env bash
+set -u
 
-#---
-HOSTNAME=$(hostname)
-IP=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-DATE=$(date "+%Y_%m_%d / %H:%M:%S")
-resultfile="Results_$(date '+%F').txt"
-IS_VUL=0
-U_15_1=0
+# =========================================================
+# U_15 (상) 파일 및 디렉터리 소유자 설정 | Ubuntu 24.04
+# - 진단 기준: 소유자(nouser) 또는 그룹(nogroup)이 없는 파일 존재 여부 점검
+# - DB 정합성: IS_AUTO=0 (수동 조치 권장)
+# - 최적화: -xdev(로컬 시스템만), -print -quit(발견 시 즉시 종료)
+# =========================================================
 
-if [ `find / \( -nouser -or -nogroup \) 2>/dev/null | wc -l` -gt 0 ]; then
-	##echo "※ U-15 결과 : 취약(Vulnerable)"  > $resultfile 2>&1
-	#echo " 소유자가 존재하지 않는 파일 및 디렉터리가 존재합니다."  > $resultfile 2>&1
-  U_15_1=1
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
+
+FLAG_ID="U_15"
+CATEGORY="file"
+IS_AUTO=0
+
+# -------------------------
+# Flag (0: 양호, 1: 취약)
+# -------------------------
+FLAG_U_14_1=0
+
+# -------------------------
+# 1) 소유자/그룹 없는 파일 탐색
+# -------------------------
+# 하나라도 발견되면 즉시 경로 반환 후 종료
+FOUND_ORPHAN=$(find / -xdev \( -nouser -o -nogroup \) -print -quit 2>/dev/null)
+
+if [ -n "$FOUND_ORPHAN" ]; then
+    FLAG_U_15_1=1
 else
-	#echo "※ U-15 결과 : 양호(Good)"  > $resultfile 2>&1
-  U_15_1=0
+    FLAG_U_15_1=0
 fi
-	IS_VUL=$U_15_1
+
+# -------------------------
+# 2) Output (JSON)
+# -------------------------
+IS_VUL=$FLAG_U_15_1
 
 cat <<EOF
 {
   "meta": {
-    "hostname": "$HOSTNAME",
+    "hostname": "$HOST",
     "ip": "$IP",
     "user": "$USER"
   },
   "result": {
-    "flag_id": "U-15",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "file",
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
     "flag": {
-      "U_15_1": $U_15_1,
+      "U_15_1": $FLAG_U_15_1
     },
     "timestamp": "$DATE"
   }
