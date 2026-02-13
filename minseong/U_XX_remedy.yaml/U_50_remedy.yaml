@@ -1,0 +1,64 @@
+---
+- name: "U-50 DNS ZoneTransfer 설정 제한 (BIND)"
+  hosts: all
+  become: yes
+
+
+  ###################################수 동 조 치 ###################
+  vars:
+    # Zone Transfer를 허용할 신뢰할 수 있는 Secondary DNS IP (가이드 Step 4)
+    trusted_secondary_ips: "192.168.1.100; 192.168.1.101;"
+
+  tasks:
+    # 1. DNS 서비스 활성화 여부 확인
+    - name: "1. BIND 서비스(named) 상태 확인"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    # 2. DNS 서비스를 사용하지 않는 경우 (조치 방법 기준)
+    - name: "2. [조치] DNS 미사용 시 서비스 중지 및 비활성화"
+      ansible.builtin.systemd:
+        name: named
+        state: stopped
+        enabled: no
+      when: 
+        - "'named.service' in services_state.ansible_facts.services"
+        - "services_state.ansible_facts.services['named.service'].state != 'running'"
+
+    # 3. DNS 서비스 사용 시 Zone Transfer 제한 설정 (Step 1~5)
+    - name: "3. [조치] allow-transfer 설정 적용"
+      block:
+        - name: "3-1. named.conf 내 allow-transfer 설정 수정/추가 (Step 2, 4)"
+          # 가이드의 allow-transfer { <IP>; }; 형식을 파일의 options 블록 내에 적용합니다.
+          ansible.builtin.replace:
+            path: "{{ item }}"
+            regexp: 'allow-transfer\s*\{[^}]*\};'
+            replace: "allow-transfer { {{ trusted_secondary_ips }} };"
+          loop:
+            - /etc/named.conf
+            - /etc/bind/named.conf.options
+          register: zone_transfer_update
+          ignore_errors: yes
+
+        - name: "3-2. 기존 설정이 없을 경우 신규 라인 추가"
+          ansible.builtin.lineinfile:
+            path: "{{ item }}"
+            line: "        allow-transfer { {{ trusted_secondary_ips }} };"
+            insertafter: 'options \{'
+            state: present
+          loop:
+            - /etc/named.conf
+            - /etc/bind/named.conf.options
+          when: not zone_transfer_update.changed
+          ignore_errors: yes
+          register: line_add_update
+
+        - name: "3-3. DNS 서비스 재시작 (Step 5)"
+          ansible.builtin.systemd:
+            name: named
+            state: restarted
+          when: zone_transfer_update.changed or line_add_update.changed
+
+      when: 
+        - "'named.service' in services_state.ansible_facts.services"
+        - "services_state.ansible_facts.services['named.service'].state == 'running'"
