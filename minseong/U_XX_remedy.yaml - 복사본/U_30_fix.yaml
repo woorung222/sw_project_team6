@@ -1,0 +1,137 @@
+---
+- name: 주요정보통신기반시설 보안 조치 - U-30 ( UMASK 설정 관리 )
+  hosts: all
+  become: yes
+
+  vars:
+   flag_list: []
+   ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+   ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+   STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+
+   log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+   json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: ubuntu24-remediate_U-54.log / .json
+   my_log_file: "{{ log_dir }}/ubuntu24-remediate_{{ flag_list }}.log"
+   my_json_file: "{{ json_dir }}/ubuntu24-remediate_{{ flag_list }}.json"
+  tasks: 
+
+   # 1. /etc/profile 내 umask 설정 수정 (모든 리눅스 공통)
+    - name: "[/etc/profile] 기존 umask 설정 수정"
+      ansible.builtin.replace:
+        path: /etc/profile
+        regexp: '^\s*umask\s+\d+'
+        replace: 'umask 022'
+      register: profile_update
+      when: "'U_30_1' in flag_list"
+
+    - name: "[/etc/profile] umask 설정이 없을 경우 추가"
+      ansible.builtin.lineinfile:
+         path: /etc/profile
+         line: "umask 022\nexport umask"  # 이미지 가이드의 export 문구 포함
+         insertafter: EOF
+      when: not profile_update.changed && "'U_30_1' in flag_list"
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+      path: "{{ my_log_file }}"     # [필수] vars에 선언한 로그 파일 경로
+      create: yes                   # [옵션] 파일 없으면 생성
+      mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+      line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_30_1",
+          "section": "[조치 내용]",
+          "title": "[U_30_1] ([/etc/profile] 기존 umask 설정 수정)",
+          "cmd": " vi /etc/profile, umask 022, export umask ",
+          "result": "조치 성공 ([/etc/profile] 기존 umask 설정 수정)"
+         } | to_json
+        }}
+      when: "'U_30_1' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+      path: "{{ my_json_file }}"     # [필수] vars에 선언한 로그 파일 경로
+      create: yes                   # [옵션] 파일 없으면 생성
+      mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+      line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_30_1",
+              "status": 2, 
+              "description": "[/etc/profile] 기존 umask 설정 수정 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } | to_json
+        }}
+      changed_when: false
+      when: "'U_30_1' in flag_list"
+
+    # 2. /etc/login.defs 내 UMASK 설정 수정 (Linux 전용)
+    - name: "3. [/etc/login.defs] UMASK 값 022로 설정"
+      ansible.builtin.lineinfile:
+         path: /etc/login.defs
+         regexp: '^UMASK\s+'
+         line: 'UMASK 022'
+         state: present
+      when: "'U_30_2' in flag_list"
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+      path: "{{ my_log_file }}"     # [필수] vars에 선언한 로그 파일 경로
+      create: yes                   # [옵션] 파일 없으면 생성
+      mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+      line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_30_2",
+          "section": "[조치 내용]",
+          "title": "[U_30_2] ([/etc/login.defs] 기존 umask 설정 수정)",
+          "cmd": " vi /etc/login.defs, umask 022, export umask ",
+          "result": "조치 성공 ([/etc/login.defs] 기존 umask 설정 수정)"
+         } | to_json
+        }}
+      when: "'U_30_2' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+      path: "{{ my_json_file }}"     # [필수] vars에 선언한 로그 파일 경로
+      create: yes                   # [옵션] 파일 없으면 생성
+      mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+      line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_30_2",
+              "status": 2, 
+              "description": "[/etc/login.defs] 기존 umask 설정 수정 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } | to_json
+        }}
+      changed_when: false
+      when: "'U_30_2' in flag_list"
