@@ -109,7 +109,7 @@ cat <<EOF
   "result": {
     "flag_id": "U-57",
     "is_vul": $IS_VUL,
-    "is_auto": 0,
+    "is_auto": 1,
     "category": "service",
     "flag": {
       "U_57_1": $U_57_1,
