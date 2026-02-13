@@ -2,15 +2,14 @@
 set -u
 
 # =========================================================
-# U_03 (상) 계정 잠금 임계값 설정 | Ubuntu 24.04 (Debian 계열)
-# - (일반 기준) 로그인 실패 시 계정 잠금(또는 지연/해제시간) 정책 존재 여부 점검
-# - 팀 조건: flag(0/1) 명확 판별, VULN_STATUS는 flag로만 산출
-# - Ubuntu(Debian) 반영: flag 1개 (U_03_1)
+# U_03 (상) 계정 잠금 임계값 설정 | Ubuntu 24.04
+# - 진단 기준: faillock(authselect) 임계값 설정 여부 (DB U_03_3 매핑)
+# - Rocky/DB 와의 통일성:
+#   U_03_1 (pam_tally) : Ubuntu 24 사용 안 함 -> 0 (양호/해당없음)
+#   U_03_2 (pam_tally2): Ubuntu 24 사용 안 함 -> 0 (양호/해당없음)
+#   U_03_3 (faillock)  : Ubuntu 24 표준 -> 점검 대상
 # =========================================================
 
-# -------------------------
-# Meta
-# -------------------------
 HOST="$(hostname)"
 IP="$(hostname -I | awk '{print $1}')"
 USER="$(whoami)"
@@ -21,33 +20,34 @@ CATEGORY="account"
 IS_AUTO=1
 
 # -------------------------
-# Flag (0: 양호, 1: 취약)
+# Flags (0: 양호, 1: 취약)
 # -------------------------
-FLAG_U_03_1=1  # 기본은 보수적으로 취약
+# Ubuntu 24.04는 tally/tally2를 쓰지 않으므로 해당 없음(0) 처리
+FLAG_U_03_1=0
+FLAG_U_03_2=0
+FLAG_U_03_3=1 # faillock 기본은 취약으로 가정하고 점검 시작
 
 # -------------------------
-# Evidence (내부 판단용: 출력하지 않음)
+# Evidence (내부 판단용)
 # -------------------------
-FA_LOCK_MODULE="not_set"     # pam_faillock 적용 여부
-DENY_VAL="not_set"           # deny 값
-UNLOCK_TIME_VAL="not_set"    # unlock_time 값
+FA_LOCK_MODULE="not_set"
+DENY_VAL="not_set"
+UNLOCK_TIME_VAL="not_set"
 
 # -------------------------
-# Helper: 주석 제거한 라인만 대상으로 마지막 설정 우선
+# Helper: 주석 제거
 # -------------------------
 strip_comments() {
-  # stdin -> stdout : 주석/공백 라인 제거
   grep -vE '^\s*#' | grep -vE '^\s*$'
 }
 
 # -------------------------
-# 1) PAM 파일에서 pam_faillock 적용 여부 확인 (Ubuntu/Debian)
-# - 보통 /etc/pam.d/common-auth, common-account 쪽에 존재
+# 1) PAM faillock 적용 여부 확인 (common-auth / common-account)
 # -------------------------
 PAM_AUTH="/etc/pam.d/common-auth"
 PAM_ACCT="/etc/pam.d/common-account"
-
 HAS_FAILLOCK=0
+
 if [ -f "$PAM_AUTH" ]; then
   if strip_comments < "$PAM_AUTH" 2>/dev/null | grep -qE '\bpam_faillock\.so\b'; then
     HAS_FAILLOCK=1
@@ -64,36 +64,31 @@ if [ "$HAS_FAILLOCK" -eq 1 ]; then
 fi
 
 # -------------------------
-# 2) pam_faillock 설정 값 확인
-#   2-1) /etc/security/faillock.conf
-#   2-2) PAM 라인 옵션(deny=, unlock_time=)에서 마지막 값
+# 2) faillock 설정 값 확인
 # -------------------------
 FAILLOCK_CONF="/etc/security/faillock.conf"
 if [ -f "$FAILLOCK_CONF" ]; then
-  # deny
+  # deny check
   DV="$(strip_comments < "$FAILLOCK_CONF" 2>/dev/null | grep -E '^\s*deny\s*=' | tail -n 1 | awk -F= '{gsub(/[[:space:]]/,"",$2); print $2}')"
   if [ -n "${DV:-}" ]; then
     DENY_VAL="$DV"
   fi
 
-  # unlock_time
+  # unlock_time check
   UV="$(strip_comments < "$FAILLOCK_CONF" 2>/dev/null | grep -E '^\s*unlock_time\s*=' | tail -n 1 | awk -F= '{gsub(/[[:space:]]/,"",$2); print $2}')"
   if [ -n "${UV:-}" ]; then
     UNLOCK_TIME_VAL="$UV"
   fi
 fi
 
-# PAM 라인에서 deny/unlock_time 옵션을 보조로 파싱 (conf에 없을 때 대비)
-# common-auth 내 pam_faillock 라인(들)에서 마지막 옵션 우선
+# PAM 파일 내 인자(argument) 확인 (conf 파일 없을 경우 대비)
 if [ -f "$PAM_AUTH" ]; then
   LAST_FL_LINE="$(strip_comments < "$PAM_AUTH" 2>/dev/null | grep -E '\bpam_faillock\.so\b' | tail -n 1 || true)"
   if [ -n "${LAST_FL_LINE:-}" ]; then
-    # deny=
     PAM_DENY="$(echo "$LAST_FL_LINE" | grep -oE 'deny=[0-9]+' | tail -n 1 | cut -d= -f2 || true)"
     if [ -n "${PAM_DENY:-}" ] && [ "$DENY_VAL" = "not_set" ]; then
       DENY_VAL="$PAM_DENY"
     fi
-    # unlock_time=
     PAM_UNLOCK="$(echo "$LAST_FL_LINE" | grep -oE 'unlock_time=[0-9]+' | tail -n 1 | cut -d= -f2 || true)"
     if [ -n "${PAM_UNLOCK:-}" ] && [ "$UNLOCK_TIME_VAL" = "not_set" ]; then
       UNLOCK_TIME_VAL="$PAM_UNLOCK"
@@ -102,45 +97,44 @@ if [ -f "$PAM_AUTH" ]; then
 fi
 
 # -------------------------
-# 3) 판정 (flag 1개)
-# 양호(FLAG=0) 조건(보수적/일반형):
-# - pam_faillock 적용(set)
-# - deny 값이 숫자이며 1 이상(임계값 존재)
-# - unlock_time 값이 숫자이며 0 이상(정책 존재로 간주)
-#   * unlock_time은 환경에 따라 "0(관리자 해제)"도 정책으로 볼 수 있어 0 이상 허용
+# 3) 판정 (U_03_3 : faillock)
+# - 모듈 적용(set)
+# - deny >= 1 (임계값 설정됨)
+# - unlock_time >= 0 (잠금 정책 존재)
 # -------------------------
 OK_DENY=0
 OK_UNLOCK=0
 
 if [ "$DENY_VAL" != "not_set" ] 2>/dev/null; then
+  # deny 값은 숫자여야 하며, 1 이상이어야 함 (0은 잠금 안 함)
   if [[ "$DENY_VAL" =~ ^[0-9]+$ ]] && [ "$DENY_VAL" -ge 1 ]; then
     OK_DENY=1
   fi
 fi
 
 if [ "$UNLOCK_TIME_VAL" != "not_set" ] 2>/dev/null; then
+  # unlock_time은 숫자여야 함
   if [[ "$UNLOCK_TIME_VAL" =~ ^[0-9]+$ ]] && [ "$UNLOCK_TIME_VAL" -ge 0 ]; then
     OK_UNLOCK=1
   fi
 fi
 
 if [ "$FA_LOCK_MODULE" = "set" ] && [ "$OK_DENY" -eq 1 ] && [ "$OK_UNLOCK" -eq 1 ]; then
-  FLAG_U_03_1=0
+  FLAG_U_03_3=0 # 양호
 else
-  FLAG_U_03_1=1
+  FLAG_U_03_3=1 # 취약
 fi
 
 # -------------------------
-# 4) VULN_STATUS (flag로만 산출)
+# 4) VULN_STATUS
 # -------------------------
-if [ "$FLAG_U_03_1" -eq 1 ]; then
+IS_VUL=0
+if [ "$FLAG_U_03_1" -eq 1 ] || [ "$FLAG_U_03_2" -eq 1 ] || [ "$FLAG_U_03_3" -eq 1 ]; then
   IS_VUL=1
-else
-  IS_VUL=0
 fi
 
 # -------------------------
-# 5) Output (JSON: 필요한 필드만)
+# 5) Output (JSON)
 # -------------------------
 cat <<EOF
 {
@@ -155,10 +149,11 @@ cat <<EOF
     "is_auto": $IS_AUTO,
     "category": "$CATEGORY",
     "flag": {
-      "U_03_1": $FLAG_U_03_1
+      "U_03_1": $FLAG_U_03_1,
+      "U_03_2": $FLAG_U_03_2,
+      "U_03_3": $FLAG_U_03_3
     },
     "timestamp": "$DATE"
   }
 }
 EOF
-

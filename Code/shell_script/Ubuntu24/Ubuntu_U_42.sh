@@ -1,85 +1,104 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
-# 자동 조치 가능 여부 : 가능
-# 점검 내용 : 가이드에 명시된 불필요한 RPC 서비스 15종 활성화 여부 점검
-# 대상 : Ubuntu 24.04.3
+# =========================================================
+# U_42 (상) 불필요한 RPC 서비스 비활성화 | Ubuntu 24.04
+# - 진단 기준: 가이드에 명시된 불필요한 RPC 서비스 16종 활성화 여부 점검
+# - Rocky 논리 반영:
+#   U_42_1 : [inetd] 내 RPC 서비스 설정 여부
+#   U_42_2 : [xinetd] 내 RPC 서비스 설정 여부
+#   U_42_3 : [systemd/Process] rpcbind 및 RPC 취약 서비스 활성 여부
+# =========================================================
 
-# --- 1. 메타데이터 수집 ---
-HOSTNAME=$(hostname)
-IP_ADDR=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-TIMESTAMP=$(date "+%Y_%m_%d / %H:%M:%S")
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
 
-# --- 2. 점검 변수 초기화 ---
-# U_42_1 : [1. inetd] 내 RPC 서비스 설정 여부
-# U_42_2 : [2. xinetd] 내 RPC 서비스 설정 여부
-# U_42_3 : [3. systemd] 및 rpcinfo 기반 서비스 활성 여부
+FLAG_ID="U_42"
+CATEGORY="service"
+IS_AUTO=1
+
+# -------------------------
+# Flags (0: 양호, 1: 취약)
+# -------------------------
 U_42_1=0
 U_42_2=0
 U_42_3=0
 
-# 가이드 명시 불필요 RPC 서비스 리스트 (15종)
-RPC_LIST="rpc.cmsd|rpc.ttdbserverd|sadmind|rusersd|walld|sprayd|rstatd|rpc.nisd|rexd|rpc.pcnfsd|rpc.statd|rpc.ypupdated|rpc.rquotad|kcms_server|cachefsd"
+# 점검 대상 RPC 서비스 리스트 (Rocky/Ansible 16종 기준 통일)
+RPC_TARGETS=(
+    "rpcbind" "rpc.cmsd" "rpc.ttdbserverd" "sadmind" "rusersd" "walld"
+    "sprayd" "rstatd" "rpc.nisd" "rexd" "rpc.pcnfsd"
+    "rpc.statd" "rpc.ypupdated" "rpc.rquotad" "kcms_server" "cachefsd"
+)
+RPC_REGEX=$(IFS="|"; echo "${RPC_TARGETS[*]}")
 
-# --- 3. 점검 로직 수행 ---
-
-# [Step 1] 1. inetd 설정 확인
+# -------------------------
+# 1. [inetd] 점검 (U_42_1)
+# -------------------------
 if [ -f "/etc/inetd.conf" ]; then
-    INETD_RPC=$(sudo grep -v "^#" /etc/inetd.conf | grep -iE "$RPC_LIST")
-    if [ -n "$INETD_RPC" ]; then
+    if grep -v "^#" /etc/inetd.conf | grep -E "($RPC_REGEX)" >/dev/null 2>&1; then
         U_42_1=1
     fi
 fi
 
-# [Step 2] 2. xinetd 설정 확인
+# -------------------------
+# 2. [xinetd] 점검 (U_42_2)
+# -------------------------
 if [ -d "/etc/xinetd.d" ]; then
-    # disable = no 로 설정된 항목 중 RPC 리스트에 포함되는 것 확인
-    XINETD_RPC=$(sudo grep -rEi "disable.*=.*no" /etc/xinetd.d/ 2>/dev/null | grep -iE "$RPC_LIST")
-    if [ -n "$XINETD_RPC" ]; then
+    if grep -rEi "disable" /etc/xinetd.d/ 2>/dev/null | grep -E "($RPC_REGEX)" | grep -iw "no" >/dev/null 2>&1; then
         U_42_2=1
     fi
 fi
 
-# [Step 3] 3. systemd 및 실시간 서비스 확인
-# systemd 유닛 상태 확인 (enabled 된 것)
-SYSTEMD_RPC=$(systemctl list-unit-files 2>/dev/null | grep -iE "$RPC_LIST" | grep "enabled")
+# -------------------------
+# 3. [systemd/rpcinfo] 점검 (U_42_3)
+# -------------------------
+# 3-1. systemd Active 상태 확인
+for svc in "${RPC_TARGETS[@]}"; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        U_42_3=1
+        break
+    fi
+done
 
-# rpcinfo -p 결과 확인 (실제 포트 리스닝 중인 것)
-RPCINFO_RPC=""
-if command -v rpcinfo > /dev/null; then
-    RPCINFO_RPC=$(rpcinfo -p 2>/dev/null | grep -iE "$RPC_LIST")
+# 3-2. rpcinfo를 통한 실시간 등록 서비스 확인 (보조 점검)
+if [ "$U_42_3" -eq 0 ] && command -v rpcinfo >/dev/null; then
+    if rpcinfo -p 2>/dev/null | grep -E "($RPC_REGEX)" >/dev/null 2>&1; then
+        U_42_3=1
+    fi
 fi
 
-if [ -n "$SYSTEMD_RPC" ] || [ -n "$RPCINFO_RPC" ]; then
-    U_42_3=1
-fi
-
-# --- 4. 최종 취약 여부 판단 ---
+# -------------------------
+# VULN_STATUS
+# -------------------------
+IS_VUL=0
 if [ "$U_42_1" -eq 1 ] || [ "$U_42_2" -eq 1 ] || [ "$U_42_3" -eq 1 ]; then
     IS_VUL=1
-else
-    IS_VUL=0
 fi
 
-# --- 5. JSON 출력 (Stdout) ---
+# -------------------------
+# Output (JSON)
+# -------------------------
 cat <<EOF
 {
   "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP_ADDR",
-    "user": "$CURRENT_USER"
+    "hostname": "$HOST",
+    "ip": "$IP",
+    "user": "$USER"
   },
   "result": {
-    "flag_id": "U-42",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "service",
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
     "flag": {
       "U_42_1": $U_42_1,
       "U_42_2": $U_42_2,
       "U_42_3": $U_42_3
     },
-    "timestamp": "$TIMESTAMP"
+    "timestamp": "$DATE"
   }
 }
 EOF

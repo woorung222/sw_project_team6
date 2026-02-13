@@ -1,88 +1,110 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
-# 자동 조치 가능 여부 : 가능
-# 점검 내용 : DoS 공격에 이용 가능한 서비스(echo, discard, daytime, chargen, ntp, snmp, dns, smtp) 비활성화 여부 점검
-# 대상 : Ubuntu 24.04.3
+# =========================================================
+# U_38 (상) DoS 공격에 취약한 서비스 비활성화 | Ubuntu 24.04
+# - 진단 기준: Simple TCP/UDP Services(echo, discard, daytime, chargen) 비활성화 여부
+# - Rocky 논리 반영:
+#   U_38_1: inetd.conf 설정
+#   U_38_2: xinetd.d 설정
+#   U_38_3: systemd 서비스 Active 여부 (필수 서비스인 NTP/SMTP 등은 제외하고 순수 DoS 서비스만 점검)
+#   U_38_4: 관련 포트 오픈 여부
+# =========================================================
 
-# --- 1. 메타데이터 수집 ---
-HOSTNAME=$(hostname)
-IP_ADDR=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-TIMESTAMP=$(date "+%Y_%m_%d / %H:%M:%S")
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
 
-# --- 2. 점검 변수 초기화 ---
-# U_38_1 : [/etc/inetd.conf] 내 취약 서비스 활성 여부
-# U_38_2 : [/etc/xinetd.d/] 내 취약 서비스 활성 여부
-# U_38_3 : [systemd] 유닛 활성화 여부
-# U_38_4 : [Port] 포트(7, 9, 13, 19, 123, 161, 53, 25) 오픈 여부
+FLAG_ID="U_38"
+CATEGORY="service"
+IS_AUTO=1
+
+# -------------------------
+# Flags (0: 양호, 1: 취약)
+# -------------------------
 U_38_1=0
 U_38_2=0
 U_38_3=0
 U_38_4=0
 
-# 점검 서비스 키워드 정의
-DOS_SERVICES="echo|discard|daytime|chargen|ntp|snmp|dns|named|bind|smtp|sendmail|postfix"
-# 점검 포트 정의 (7, 9, 13, 19, 123, 161, 53, 25)
-DOS_PORTS_REGEX=":(7|9|13|19|123|161|53|25) "
+# 점검 대상 서비스 (Rocky/Ansible 기준 통일)
+# NTP, DNS, SMTP 등은 U-38의 주 타겟(Simple Services)이 아니므로 제외
+DOS_SERVICES="echo|discard|daytime|chargen"
 
-# --- 3. 점검 로직 수행 ---
-
-# [Step 1] /etc/inetd.conf 설정 확인
+# -------------------------
+# 1. [inetd] 점검 (U_38_1)
+# -------------------------
 if [ -f "/etc/inetd.conf" ]; then
-    INETD_DOS=$(sudo grep -v "^#" /etc/inetd.conf | grep -iE "$DOS_SERVICES")
-    if [ -n "$INETD_DOS" ]; then
+    if grep -v "^#" /etc/inetd.conf | grep -E "^\s*($DOS_SERVICES)\s+" >/dev/null 2>&1; then
         U_38_1=1
     fi
 fi
 
-# [Step 2] /etc/xinetd.d/ 설정 확인
+# -------------------------
+# 2. [xinetd] 점검 (U_38_2)
+# -------------------------
 if [ -d "/etc/xinetd.d" ]; then
-    XINETD_DOS=$(sudo grep -rEi "disable.*=.*no" /etc/xinetd.d/ 2>/dev/null | grep -iE "$DOS_SERVICES")
-    if [ -n "$XINETD_DOS" ]; then
+    # disable = no 인 항목 중 대상 서비스가 있는지 확인
+    if grep -rEi "disable" /etc/xinetd.d/ 2>/dev/null | grep -E "$DOS_SERVICES" | grep -iw "no" >/dev/null 2>&1; then
         U_38_2=1
     fi
 fi
 
-# [Step 3] systemd 서비스 유닛 확인
-# ntp, snmp, dns(named/bind), smtp(postfix/sendmail) 유닛 상태 통합 점검
-SYSTEMD_DOS=$(systemctl list-unit-files 2>/dev/null | grep -iE "$DOS_SERVICES|chrony" | grep "enabled")
-if [ -n "$SYSTEMD_DOS" ]; then
+# -------------------------
+# 3. [systemd] 점검 (U_38_3)
+# -------------------------
+# Rocky 기준과 동일하게 'Active' 상태 확인 (실제 떠있는지)
+# echo-dgram, echo-stream 등 변형 이름도 포함될 수 있으므로 포괄 검색
+# 단, 명확하게 echo, discard, daytime, chargen 이 포함된 유닛만.
+if systemctl list-units --type service,socket --state=active 2>/dev/null | grep -E "($DOS_SERVICES)" >/dev/null 2>&1; then
     U_38_3=1
 fi
 
-# [Step 4] 실제 오픈된 포트 확인 (TCP/UDP 통합)
-DOS_ACTIVE_PORTS=$(sudo netstat -antup 2>/dev/null | grep -E "$DOS_PORTS_REGEX" | grep -E "LISTEN|UDP")
-if [ -n "$DOS_ACTIVE_PORTS" ]; then
+# -------------------------
+# 4. [Port] 점검 (U_38_4)
+# -------------------------
+# 포트: 7(echo), 9(discard), 13(daytime), 19(chargen)
+# 추가: 123(ntp), 161(snmp), 53(dns), 25(smtp) -> 가이드상 확인용으로 남겨둠
+DOS_PORTS_REGEX=":7 |:9 |:13 |:19 |:123 |:161 |:53 |:25 "
+
+if ss -tuln | grep -E "$DOS_PORTS_REGEX" >/dev/null 2>&1; then
+    # 포트가 열려있으면 1 (단, U_38_4는 참고용 성격이 강함)
     U_38_4=1
 fi
 
-# --- 4. 최종 취약 여부 판단 ---
+# -------------------------
+# VULN_STATUS
+# -------------------------
+IS_VUL=0
+# U_38_4(포트)는 단순 오픈 여부이므로, 실제 취약 여부는 1,2,3(서비스 설정) 위주로 판단하거나
+# 가이드 기준에 따라 4번도 포함. 여기서는 모두 포함.
 if [ "$U_38_1" -eq 1 ] || [ "$U_38_2" -eq 1 ] || [ "$U_38_3" -eq 1 ] || [ "$U_38_4" -eq 1 ]; then
     IS_VUL=1
-else
-    IS_VUL=0
 fi
 
-# --- 5. JSON 출력 (Stdout) ---
+# -------------------------
+# Output (JSON)
+# -------------------------
 cat <<EOF
 {
   "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP_ADDR",
-    "user": "$CURRENT_USER"
+    "hostname": "$HOST",
+    "ip": "$IP",
+    "user": "$USER"
   },
   "result": {
-    "flag_id": "U-38",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "service",
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
     "flag": {
       "U_38_1": $U_38_1,
       "U_38_2": $U_38_2,
       "U_38_3": $U_38_3,
       "U_38_4": $U_38_4
     },
-    "timestamp": "$TIMESTAMP"
+    "timestamp": "$DATE"
   }
 }
 EOF

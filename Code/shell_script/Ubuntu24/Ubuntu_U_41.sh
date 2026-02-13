@@ -1,67 +1,74 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
-# 자동 조치 가능 여부 : 가능
-# 점검 내용 : automountd(autofs) 서비스 활성화 여부 점검
-# 대상 : Ubuntu 24.04.3
+# =========================================================
+# U_41 (상) 불필요한 automountd 제거 | Ubuntu 24.04
+# - 진단 기준: autofs(automountd) 서비스가 활성화되어 있는지 점검
+# - Rocky 논리 반영:
+#   U_41_1 : 현재 서비스가 실행 중(Active)이거나 프로세스가 존재하는지 확인
+#   U_41_2 : 부팅 시 자동 실행(Enabled) 설정되어 있는지 확인
+# =========================================================
 
-# --- 1. 메타데이터 수집 ---
-HOSTNAME=$(hostname)
-IP_ADDR=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-TIMESTAMP=$(date "+%Y_%m_%d / %H:%M:%S")
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
 
-# --- 2. 점검 변수 초기화 ---
-# U_41_1 : 현재 실행 중인 automountd 프로세스 점검
-# U_41_2 : 시스템 시작 시 자동 실행 설정(부팅 시 활성화) 점검
+FLAG_ID="U_41"
+CATEGORY="service"
+IS_AUTO=1
+
+# -------------------------
+# Flags (0: 양호, 1: 취약)
+# -------------------------
 U_41_1=0
 U_41_2=0
 
-# --- 3. 점검 로직 수행 ---
-
-# [Step 1] automountd 서비스 실행 여부 확인
-# 명령어: ps -ef | grep automount
-AUTOMOUNT_PS=$(ps -ef | grep -iE "automount|autofs" | grep -v "grep")
-
-if [ -n "$AUTOMOUNT_PS" ]; then
+# -------------------------
+# 1. [U_41_1] 현재 실행 여부 점검
+# -------------------------
+# systemd 서비스 상태 확인 또는 프로세스(automount, autofs) 확인
+if systemctl is-active --quiet autofs 2>/dev/null || \
+   ps -ef | grep -v grep | grep -E "automount|autofs" >/dev/null 2>&1; then
     U_41_1=1
 fi
 
-# [Step 2] 시작 스크립트 내 서비스 활성 여부 확인
-# 2-1. 레거시 init 스크립트 (rc.d) 확인
-RC_CHECK=$(ls -l /etc/rc*.d/S* 2>/dev/null | grep -E "amd|autofs")
-
-# 2-2. Systemd 유닛 상태 확인
-SYSTEMD_CHECK=$(systemctl list-unit-files 2>/dev/null | grep -iE "autofs|automount" | grep "enabled")
-
-if [ -n "$RC_CHECK" ] || [ -n "$SYSTEMD_CHECK" ]; then
+# -------------------------
+# 2. [U_41_2] 자동 실행 설정 점검
+# -------------------------
+# systemd 서비스가 enabled 상태인지 확인
+if systemctl is-enabled --quiet autofs 2>/dev/null; then
     U_41_2=1
 fi
 
-# --- 4. 최종 취약 여부 판단 ---
+# -------------------------
+# VULN_STATUS
+# -------------------------
+IS_VUL=0
 if [ "$U_41_1" -eq 1 ] || [ "$U_41_2" -eq 1 ]; then
     IS_VUL=1
-else
-    IS_VUL=0
 fi
 
-# --- 5. JSON 출력 (Stdout) ---
+# -------------------------
+# Output (JSON)
+# -------------------------
 cat <<EOF
 {
   "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP_ADDR",
-    "user": "$CURRENT_USER"
+    "hostname": "$HOST",
+    "ip": "$IP",
+    "user": "$USER"
   },
   "result": {
-    "flag_id": "U-41",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "service",
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
     "flag": {
       "U_41_1": $U_41_1,
       "U_41_2": $U_41_2
     },
-    "timestamp": "$TIMESTAMP"
+    "timestamp": "$DATE"
   }
 }
 EOF

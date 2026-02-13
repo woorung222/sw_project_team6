@@ -1,82 +1,100 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
-# 자동 조치 가능 여부 : 가능
-# 점검 내용 : NFS 서비스 활성화 여부 확인 및 불필요한 서비스 비활성화 점검
-# 대상 : Ubuntu 24.04.3
+# =========================================================
+# U_39 (상) 불필요한 NFS 서비스 비활성화 | Ubuntu 24.04
+# - 진단 기준: NFS 서비스(nfs-server, rpcbind) 활성화 여부 점검
+# - Rocky 논리 반영:
+#   U_39_1 : systemd 서비스(nfs-server, rpcbind) Active 여부
+#   U_39_2 : NFS 관련 프로세스 및 포트(2049, 111) Listen 여부
+#   U_39_3 : NFS 패키지 설치 또는 /etc/exports 설정 존재 여부
+# =========================================================
 
-# --- 1. 메타데이터 수집 ---
-HOSTNAME=$(hostname)
-IP_ADDR=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-TIMESTAMP=$(date "+%Y_%m_%d / %H:%M:%S")
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
 
-# --- 2. 점검 변수 초기화 ---
-# U_39_1 : [가이드 필수] systemctl list-units 명령어를 통한 nfs 서비스 활성 여부
-# U_39_2 : [프로세스/포트] nfsd 프로세스 및 2049/111 포트 오픈 여부
-# U_39_3 : [패키지/설정] nfs 패키지 설치 및 /etc/exports 설정 존재 여부
+FLAG_ID="U_39"
+CATEGORY="service"
+IS_AUTO=1
+
+# -------------------------
+# Flags (0: 양호, 1: 취약)
+# -------------------------
 U_39_1=0
 U_39_2=0
 U_39_3=0
 
-# --- 3. 점검 로직 수행 ---
-
-# [Step 1] 가이드 명시 필수 점검 (Systemd Service)
-# 활성화(running/active)된 nfs 관련 서비스 유닛 확인
-NFS_SERVICE_UNIT=$(systemctl list-units --type=service | grep nfs)
-
-if [ -n "$NFS_SERVICE_UNIT" ]; then
+# -------------------------
+# 1. [systemd] 점검 (U_39_1)
+# -------------------------
+# nfs-server 또는 rpcbind가 하나라도 Active이면 취약
+if systemctl is-active --quiet nfs-server 2>/dev/null || \
+   systemctl is-active --quiet rpcbind 2>/dev/null; then
     U_39_1=1
 fi
 
-# [Step 2] 실행 중인 프로세스 및 포트 점검
-# 포트: 2049(NFS), 111(RPC)
-# 프로세스: nfsd, mountd
-NFS_PORT=$(sudo netstat -antup 2>/dev/null | grep -E ":(2049|111) " | grep "LISTEN")
-NFS_PROC=$(ps -ef | grep -E "nfsd|mountd" | grep -v "grep")
+# -------------------------
+# 2. [Process/Net] 점검 (U_39_2)
+# -------------------------
+# 2-1. 포트 확인 (NFS: 2049, RPC: 111) - ss 명령어 사용 권장
+PORT_CHECK=$(ss -tuln 2>/dev/null | grep -E ":(2049|111)\s")
 
-if [ -n "$NFS_PORT" ] || [ -n "$NFS_PROC" ]; then
+# 2-2. 프로세스 확인 (nfsd, mountd)
+PROC_CHECK=$(ps -ef | grep -v grep | grep -E "nfsd|mountd")
+
+if [ -n "$PORT_CHECK" ] || [ -n "$PROC_CHECK" ]; then
     U_39_2=1
 fi
 
-# [Step 3] 관련 패키지 및 설정 파일 점검
-# 패키지: nfs-kernel-server, rpcbind
-# 설정: /etc/exports 내에 주석이 아닌 활성 라인이 있는지 확인
-NFS_PKG=$(dpkg -l | grep -E "nfs-kernel-server|rpcbind" | grep "^ii")
-EXPORT_CONF=""
+# -------------------------
+# 3. [Package/Conf] 점검 (U_39_3)
+# -------------------------
+# 3-1. 패키지 확인 (Ubuntu 기준: nfs-kernel-server, nfs-common, rpcbind)
+PACKAGES="nfs-kernel-server nfs-common rpcbind"
+INSTALLED_PKG=$(dpkg -l $PACKAGES 2>/dev/null | grep "^ii")
+
+# 3-2. 설정 파일 확인 (/etc/exports)
+CONF_CHECK=""
 if [ -f "/etc/exports" ]; then
-    EXPORT_CONF=$(sudo grep -v "^#" /etc/exports 2>/dev/null | grep -v "^$")
+    # 주석을 제외한 설정 라인이 있는지 확인
+    CONF_CHECK=$(grep -v "^#" /etc/exports | grep -v "^$")
 fi
 
-if [ -n "$NFS_PKG" ] || [ -n "$EXPORT_CONF" ]; then
+if [ -n "$INSTALLED_PKG" ] || [ -n "$CONF_CHECK" ]; then
     U_39_3=1
 fi
 
-# --- 4. 최종 취약 여부 판단 ---
+# -------------------------
+# VULN_STATUS
+# -------------------------
+IS_VUL=0
 if [ "$U_39_1" -eq 1 ] || [ "$U_39_2" -eq 1 ] || [ "$U_39_3" -eq 1 ]; then
     IS_VUL=1
-else
-    IS_VUL=0
 fi
 
-# --- 5. JSON 출력 (Stdout) ---
+# -------------------------
+# Output (JSON)
+# -------------------------
 cat <<EOF
 {
   "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP_ADDR",
-    "user": "$CURRENT_USER"
+    "hostname": "$HOST",
+    "ip": "$IP",
+    "user": "$USER"
   },
   "result": {
-    "flag_id": "U-39",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "service",
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
     "flag": {
       "U_39_1": $U_39_1,
       "U_39_2": $U_39_2,
       "U_39_3": $U_39_3
     },
-    "timestamp": "$TIMESTAMP"
+    "timestamp": "$DATE"
   }
 }
 EOF
