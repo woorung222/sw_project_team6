@@ -1,85 +1,63 @@
 #!/bin/bash
 
-# [U-53] FTP 서비스 정보 노출 제한
+# [U-53] FTP 서비스 정보 노출 제한 점검
 # 대상 운영체제 : Rocky Linux 9
-# 가이드라인 출처 : KISA 주요정보통신기반시설 가이드 p.127-130
-# 자동 조치 가능 유무 : 불가능 (배너 파일 생성 및 설정 편집)
-# 플래그 설명:
-#   U_53_1 : [vsFTP] ftpd_banner 설정 미흡 (패키지 설치 시)
-#   U_53_2 : [ProFTP] ServerIdent 설정 미흡 (패키지 설치 시)
+# 진단 기준 : vsftpd, proftpd 서비스 이용 시 배너 정보 노출 제한 설정 여부 점검
+# DB 정합성 : IS_AUTO=1 (자동화 스크립트 적용 가능)
 
-# --- 점검 로직 시작 ---
+HOSTNAME=$(hostname)
+IP=$(hostname -I | awk '{print $1}')
+USER=$(whoami)
+DATE=$(date "+%Y_%m_%d / %H:%M:%S")
 
-# 초기화
-U_53_1=0
-U_53_2=0
+# 초기 상태 설정 (DB 기준: Is Auto = 1)
+U_53_1=0; U_53_2=0
+IS_VUL=0
+IS_AUTO=1 
 
-# 1. [vsFTP] 점검 (U_53_1)
-if rpm -qa | grep -q "vsftpd"; then
-    # 설정 파일 경로 확인
-    VSFTP_CONF=""
-    if [[ -f "/etc/vsftpd/vsftpd.conf" ]]; then
-        VSFTP_CONF="/etc/vsftpd/vsftpd.conf"
-    elif [[ -f "/etc/vsftpd.conf" ]]; then
-        VSFTP_CONF="/etc/vsftpd.conf"
-    fi
-
-    if [[ -n "$VSFTP_CONF" ]]; then
-        # ftpd_banner 설정 확인 (주석 제외)
-        if ! grep -v "^#" "$VSFTP_CONF" 2>/dev/null | grep -q "ftpd_banner"; then
+# 1. [U_53_1] vsFTP 점검
+if rpm -q vsftpd >/dev/null 2>&1; then
+    VS_CONF="/etc/vsftpd/vsftpd.conf"
+    [ ! -f "$VS_CONF" ] && VS_CONF="/etc/vsftpd.conf"
+    
+    if [ -f "$VS_CONF" ]; then
+        # ftpd_banner 설정이 있는지 확인 (주석 제외)
+        if ! grep -v "^#" "$VS_CONF" | grep -qi "ftpd_banner"; then
             U_53_1=1
         fi
     else
-        # 패키지는 있는데 설정 파일이 없는 경우 (기본 설정 사용 시 버전 노출 가능성 높음)
-        U_53_1=1
+        U_53_1=1 # 패키지는 있는데 설정 파일이 없으면 기본 배너 노출 가능성 높음
     fi
 fi
 
-# 2. [ProFTP] 점검 (U_53_2)
-if rpm -qa | grep -q "proftpd"; then
-    # 설정 파일 경로 확인
-    PROFTP_CONF=""
-    if [[ -f "/etc/proftpd.conf" ]]; then
-        PROFTP_CONF="/etc/proftpd.conf"
-    elif [[ -f "/etc/proftpd/proftpd.conf" ]]; then
-        PROFTP_CONF="/etc/proftpd/proftpd.conf"
-    fi
+# 2. [U_53_2] ProFTP 점검
+if rpm -q proftpd >/dev/null 2>&1; then
+    PRO_CONF="/etc/proftpd.conf"
+    [ ! -f "$PRO_CONF" ] && PRO_CONF="/etc/proftpd/proftpd.conf"
 
-    if [[ -n "$PROFTP_CONF" ]]; then
-        # ServerIdent 설정 확인 (주석 제외)
-        if ! grep -v "^#" "$PROFTP_CONF" 2>/dev/null | grep -q "ServerIdent"; then
+    if [ -f "$PRO_CONF" ]; then
+        # ServerIdent 설정이 있고, "off" 또는 특정 메시지로 제한되어 있는지 확인
+        IDENT=$(grep -v "^#" "$PRO_CONF" | grep -i "ServerIdent")
+        if [ -z "$IDENT" ] || echo "$IDENT" | grep -qi "on"; then
             U_53_2=1
         fi
     else
-        # 설정 파일 없음
         U_53_2=1
     fi
 fi
 
-# 3. 전체 취약 여부 판단
-IS_VUL=0
-if [[ $U_53_1 -eq 1 ]] || [[ $U_53_2 -eq 1 ]]; then
-    IS_VUL=1
-fi
+[ "$U_53_1" -eq 1 ] || [ "$U_53_2" -eq 1 ] && IS_VUL=1
 
-# 4. JSON 출력
 cat <<EOF
 {
-  "meta": {
-    "hostname": "$(hostname)",
-    "ip": "$(hostname -I | awk '{print $1}')",
-    "user": "$(whoami)"
-  },
+  "meta": { "hostname": "$HOSTNAME", "ip": "$IP", "user": "$USER" },
   "result": {
     "flag_id": "U-53",
     "is_vul": $IS_VUL,
-    "is_auto": 0,
+    "is_auto": $IS_AUTO,
     "category": "service",
-    "flag": {
-      "U_53_1": $U_53_1,
-      "U_53_2": $U_53_2
-    },
-    "timestamp": "$(date "+%Y_%m_%d / %H:%M:%S")"
+    "flag": { "U_53_1": $U_53_1, "U_53_2": $U_53_2 },
+    "timestamp": "$DATE"
   }
 }
 EOF

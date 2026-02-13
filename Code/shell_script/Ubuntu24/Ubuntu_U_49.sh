@@ -1,70 +1,47 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
-# 자동 조치 가능 여부 : 가능
-# 점검 내용 : BIND 최신 버전 사용 유무 및 주기적 보안 패치 여부 점검
-# 대상 : Ubuntu 24.04.3 (LINUX 기준 점검 사례 적용)
+# =========================================================
+# U_49 (상) DNS 보안 버전 패치 | Ubuntu 24.04
+# - 진단 기준 : BIND9 서비스 활성화 여부 및 최신 패치 적용 상태 점검
+# - DB 정합성 : IS_AUTO=0 (업데이트 위험으로 수동 조치 권장)
+# =========================================================
 
-# --- 1. 메타데이터 수집 ---
-HOSTNAME=$(hostname)
-IP_ADDR=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-TIMESTAMP=$(date "+%Y_%m_%d / %H:%M:%S")
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
 
-# --- 2. 점검 변수 초기화 ---
-# U_49_1 : DNS 서비스 활성화 및 named 명령어 정상 동작 여부
-U_49_1=0
+FLAG_ID="U_49"
+CATEGORY="service"
+IS_AUTO=0
 
-# --- 3. 점검 로직 수행 ---
+U_49_1=0; U_49_2=0
 
-# [Step 1] DNS 서비스 활성화 여부 확인
-# named 서비스가 로드되어 있고 활성(active) 상태인지 확인
-DNS_ACT=$(systemctl list-units --type=service 2>/dev/null | grep named)
+# 1) [U_49_1] DNS(BIND9) 서비스 활성화 점검
+# Ubuntu에서는 서비스명이 bind9인 경우가 많음
+if systemctl is-active --quiet bind9 2>/dev/null || systemctl is-active --quiet named 2>/dev/null; then
+    U_49_1=1
 
-if [ -n "$DNS_ACT" ]; then
-    # 서비스가 활성화되어 있는 경우
-    
-    # [Step 2] BIND 버전 확인 가능 여부 점검
-    if command -v named > /dev/null; then
-        # named 명령어가 존재하면 버전을 확인 (로그로만 남김)
-        BIND_VER=$(named -v)
-        echo "  - [Info] BIND Version: $BIND_VER" >&2
-        
-        # 버전이 확인되면 일단 양호(0)로 간주 
-        # (최신 패치 비교는 외부 DB 필요하므로 자동화에선 실행 가능성만 체크)
-        U_49_1=0
-    else
-        # 서비스는 돌고 있는데 named 명령어가 없는 경우 (비정상 상태)
-        U_49_1=1
+    # 2) [U_49_2] 구버전(보안 업데이트 대상) 점검
+    if apt list --upgradable 2>/dev/null | grep -qiE "bind9|named"; then
+        U_49_2=1
     fi
-else
-    # DNS 서비스를 사용하지 않는 경우 (양호)
-    U_49_1=0
 fi
 
-# --- 4. 최종 취약 여부 판단 ---
-if [ "$U_49_1" -eq 1 ]; then
-    IS_VUL=1
-else
-    IS_VUL=0
-fi
+IS_VUL=0
+[ "$U_49_2" -eq 1 ] && IS_VUL=1
 
-# --- 5. JSON 출력 (Stdout) ---
 cat <<EOF
 {
-  "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP_ADDR",
-    "user": "$CURRENT_USER"
-  },
+  "meta": { "hostname": "$HOST", "ip": "$IP", "user": "$USER" },
   "result": {
-    "flag_id": "U-49",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "service",
-    "flag": {
-      "U_49_1": $U_49_1
-    },
-    "timestamp": "$TIMESTAMP"
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
+    "flag": { "U_49_1": $U_49_1, "U_49_2": $U_49_2 },
+    "timestamp": "$DATE"
   }
 }
 EOF

@@ -1,87 +1,61 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
-# 자동 조치 가능 여부 : 가능
-# 점검 내용 : SMTP 서비스 사용 시 expn, vrfy 명령어 사용 금지 설정 여부 점검
-# 대상 : Ubuntu 24.04.3 (LINUX 기준 점검 사례 적용)
+# =========================================================
+# U_48 (중) expn, vrfy 명령어 제한 | Ubuntu 24.04
+# - 진단 기준 : SMTP 서비스 정보 수집 명령어(vrfy, expn) 제한 여부 점검
+# - DB 정합성 : IS_AUTO=0
+# =========================================================
 
-# --- 1. 메타데이터 수집 ---
-HOSTNAME=$(hostname)
-IP_ADDR=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-TIMESTAMP=$(date "+%Y_%m_%d / %H:%M:%S")
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
 
-# --- 2. 점검 변수 초기화 ---
-# U_48_1 : [Sendmail] PrivacyOptions 내 noexpn, novrfy 설정 여부
-# U_48_2 : [Postfix] disable_vrfy_command 설정 여부
-# U_48_3 : [Exim] acl_smtp_vrfy, acl_smtp_expn 제한 설정 여부
-U_48_1=0
-U_48_2=0
-U_48_3=0
+FLAG_ID="U_48"
+CATEGORY="service"
+IS_AUTO=0
 
-# --- 3. 점검 로직 수행 ---
+U_48_1=0; U_48_2=0; U_48_3=0
 
-# [1. Sendmail 점검]
+# 1) Sendmail 점검
 if [ -f "/etc/mail/sendmail.cf" ]; then
-    # PrivacyOptions 설정 내 novrfy, noexpn, goaway 중 하나라도 있는지 확인
-    PRIV_OPT=$(grep "PrivacyOptions" /etc/mail/sendmail.cf)
-    VULN_CHECK=$(echo "$PRIV_OPT" | grep -E "novrfy|noexpn|goaway")
-    
-    # 설정이 없으면 취약
-    if [ -z "$VULN_CHECK" ]; then
+    PRIV_OPT=$(grep -v "^#" /etc/mail/sendmail.cf | grep "PrivacyOptions")
+    # novrfy, noexpn 또는 이들을 포함하는 goaway 옵션 체크
+    if ! echo "$PRIV_OPT" | grep -qE "novrfy|goaway" || ! echo "$PRIV_OPT" | grep -qE "noexpn|goaway"; then
         U_48_1=1
     fi
 fi
 
-# [2. Postfix 점검]
-if [ -f "/etc/postfix/main.cf" ]; then
-    # disable_vrfy_command = yes 설정이 되어 있는지 확인
-    POSTFIX_VRFY=$(grep "disable_vrfy_command" /etc/postfix/main.cf | grep -i "yes")
-    
-    # 설정이 없거나 yes가 아니면 취약
-    if [ -z "$POSTFIX_VRFY" ]; then
+# 2) Postfix 점검
+if command -v postconf >/dev/null; then
+    if [ "$(postconf -h disable_vrfy_command 2>/dev/null)" != "yes" ]; then
         U_48_2=1
     fi
 fi
 
-# [3. Exim 점검]
-EXIM_CONF="/etc/exim/exim.conf"
-[ ! -f "$EXIM_CONF" ] && EXIM_CONF="/etc/exim4/exim4.conf"
-
-if [ -f "$EXIM_CONF" ]; then
-    # acl_smtp_vrfy 또는 acl_smtp_expn 설정이 활성화(주석 아님) 되어 있으면 취약
-    EXIM_CHECK=$(grep -E "acl_smtp_vrfy|acl_smtp_expn" "$EXIM_CONF" | grep -v "^#")
-    
-    if [ -n "$EXIM_CHECK" ]; then
+# 3) Exim 점검
+E_CONF="/etc/exim4/exim4.conf"
+[ ! -f "$E_CONF" ] && E_CONF="/etc/exim/exim.conf"
+if [ -f "$E_CONF" ]; then
+    if grep -E "acl_smtp_vrfy|acl_smtp_expn" "$E_CONF" | grep -v "^#" | grep -q "accept"; then
         U_48_3=1
     fi
 fi
 
-# --- 4. 최종 취약 여부 판단 ---
-if [ "$U_48_1" -eq 1 ] || [ "$U_48_2" -eq 1 ] || [ "$U_48_3" -eq 1 ]; then
-    IS_VUL=1
-else
-    IS_VUL=0
-fi
+IS_VUL=0
+[ "$U_48_1" -eq 1 ] || [ "$U_48_2" -eq 1 ] || [ "$U_48_3" -eq 1 ] && IS_VUL=1
 
-# --- 5. JSON 출력 (Stdout) ---
 cat <<EOF
 {
-  "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP_ADDR",
-    "user": "$CURRENT_USER"
-  },
+  "meta": { "hostname": "$HOST", "ip": "$IP", "user": "$USER" },
   "result": {
-    "flag_id": "U-48",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "service",
-    "flag": {
-      "U_48_1": $U_48_1,
-      "U_48_2": $U_48_2,
-      "U_48_3": $U_48_3
-    },
-    "timestamp": "$TIMESTAMP"
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
+    "flag": { "U_48_1": $U_48_1, "U_48_2": $U_48_2, "U_48_3": $U_48_3 },
+    "timestamp": "$DATE"
   }
 }
 EOF

@@ -1,83 +1,60 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
-# 자동 조치 가능 여부 : 가능
-# 점검 내용 : SMTP 서비스 사용 시 일반 사용자의 옵션 제한 여부 점검
-# 대상 : Ubuntu 24.04.3
+# =========================================================
+# U_46 (상) 일반 사용자의 메일 서비스 실행 방지 | Ubuntu 24.04
+# - 진단 기준 : SMTP 서비스 관리 명령어 권한 및 옵션 제한 점검
+# - DB 정합성 : IS_AUTO=0
+# =========================================================
 
-# --- 1. 메타데이터 수집 ---
-HOSTNAME=$(hostname)
-IP_ADDR=$(hostname -I | awk '{print $1}')
-CURRENT_USER=$(whoami)
-TIMESTAMP=$(date "+%Y_%m_%d / %H:%M:%S")
+HOST="$(hostname)"
+IP="$(hostname -I | awk '{print $1}')"
+USER="$(whoami)"
+DATE="$(date "+%Y_%m_%d / %H:%M:%S")"
 
-# --- 2. 점검 변수 초기화 ---
-# U_46_1 : [Sendmail] PrivacyOptions 내 restrictqrun 설정 여부
-# U_46_2 : [Postfix] postsuper 명령어 일반 사용자 실행 권한 제거 여부
-# U_46_3 : [Exim] exiqgrep 명령어 일반 사용자 실행 권한 제거 여부
-U_46_1=0
-U_46_2=0
-U_46_3=0
+FLAG_ID="U_46"
+CATEGORY="service"
+IS_AUTO=0
 
-# --- 3. 점검 로직 수행 ---
+U_46_1=0; U_46_2=0; U_46_3=0
 
-# [1. Sendmail 점검]
+# 1) Sendmail 점검
 if [ -f "/etc/mail/sendmail.cf" ]; then
-    # PrivacyOptions 설정에 restrictqrun 값 포함 여부 점검
-    RESTRICT_CHECK=$(grep "PrivacyOptions" /etc/mail/sendmail.cf | grep "restrictqrun")
-    if [ -z "$RESTRICT_CHECK" ]; then
+    if ! grep -v "^#" /etc/mail/sendmail.cf | grep "PrivacyOptions" | grep -q "restrictqrun"; then
         U_46_1=1
     fi
 fi
 
-# [2. Postfix 점검]
-# postsuper 명령어 경로 확인
-POSTSUPER_CMD=$(command -v postsuper)
-if [ -n "$POSTSUPER_CMD" ]; then
-    # 일반 사용자(others)의 실행 권한(x) 확인 (stat -c "%A"의 10번째 문자)
-    # 예: -rwxr-xr-x -> x (취약) / -rwxr-x--- -> - (양호)
-    POSTSUPER_PERM=$(stat -c "%A" "$POSTSUPER_CMD" 2>/dev/null | cut -c 10)
-    if [ "$POSTSUPER_PERM" != "-" ]; then
+# 2) Postfix 점검
+POSTSUPER=$(command -v postsuper)
+if [ -n "$POSTSUPER" ]; then
+    # Other 실행 권한 확인 (8진수 마지막 자리가 홀수인지 체크)
+    if [ $(( $(stat -c "%a" "$POSTSUPER") % 2 )) -eq 1 ]; then
         U_46_2=1
     fi
 fi
 
-# [3. Exim 점검]
-# exiqgrep 명령어 경로 확인
-EXIQGREP_CMD=$(command -v exiqgrep)
-if [ -n "$EXIQGREP_CMD" ]; then
-    # 일반 사용자(others)의 실행 권한(x) 확인
-    EXIQGREP_PERM=$(stat -c "%A" "$EXIQGREP_CMD" 2>/dev/null | cut -c 10)
-    if [ "$EXIQGREP_PERM" != "-" ]; then
+# 3) Exim 점검
+EXIQGREP=$(command -v exiqgrep)
+if [ -n "$EXIQGREP" ]; then
+    if [ $(( $(stat -c "%a" "$EXIQGREP") % 2 )) -eq 1 ]; then
         U_46_3=1
     fi
 fi
 
-# --- 4. 최종 취약 여부 판단 ---
-if [ "$U_46_1" -eq 1 ] || [ "$U_46_2" -eq 1 ] || [ "$U_46_3" -eq 1 ]; then
-    IS_VUL=1
-else
-    IS_VUL=0
-fi
+IS_VUL=0
+[ "$U_46_1" -eq 1 ] || [ "$U_46_2" -eq 1 ] || [ "$U_46_3" -eq 1 ] && IS_VUL=1
 
-# --- 5. JSON 출력 (Stdout) ---
 cat <<EOF
 {
-  "meta": {
-    "hostname": "$HOSTNAME",
-    "ip": "$IP_ADDR",
-    "user": "$CURRENT_USER"
-  },
+  "meta": { "hostname": "$HOST", "ip": "$IP", "user": "$USER" },
   "result": {
-    "flag_id": "U-46",
+    "flag_id": "$FLAG_ID",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
-    "category": "service",
-    "flag": {
-      "U_46_1": $U_46_1,
-      "U_46_2": $U_46_2,
-      "U_46_3": $U_46_3
-    },
-    "timestamp": "$TIMESTAMP"
+    "is_auto": $IS_AUTO,
+    "category": "$CATEGORY",
+    "flag": { "U_46_1": $U_46_1, "U_46_2": $U_46_2, "U_46_3": $U_46_3 },
+    "timestamp": "$DATE"
   }
 }
 EOF

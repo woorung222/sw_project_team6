@@ -1,82 +1,55 @@
 #!/bin/bash
 
-# [U-52] Telnet 서비스 비활성화
+# [U-52] Telnet 서비스 비활성화 점검
 # 대상 운영체제 : Rocky Linux 9
-# 가이드라인 출처 : KISA 주요정보통신기반시설 가이드 p.124-126
-# 자동 조치 가능 유무 : 가능 (서비스 중지 및 패키지 삭제)
-# 플래그 설명:
-#   U_52_1 : [inetd] /etc/inetd.conf 내 Telnet 활성화 설정 발견
-#   U_52_2 : [xinetd] /etc/xinetd.d/telnet 내 disable=yes 미설정
-#   U_52_3 : [systemd] telnet.socket 또는 service 활성화 상태
-#   U_52_4 : [Process] 실제 Telnet 프로세스 실행 중
+# 진단 기준 : Telnet 서비스가 비활성화되어 있고 관련 프로세스가 구동되지 않는 경우 양호
+# DB 정합성 : IS_AUTO=1 (자동화 스크립트 적용)
 
-# --- 점검 로직 시작 ---
+HOSTNAME=$(hostname)
+IP=$(hostname -I | awk '{print $1}')
+USER=$(whoami)
+DATE=$(date "+%Y_%m_%d / %H:%M:%S")
 
-# 초기화
-U_52_1=0
-U_52_2=0
-U_52_3=0
-U_52_4=0
+# 초기 상태 설정 (DB 기준: Is Auto = 1)
+U_52_1=0; U_52_2=0; U_52_3=0; U_52_4=0
+IS_VUL=0
+IS_AUTO=1 
 
-# 1. 패키지 설치 여부 확인
-# telnet-server 패키지가 설치되어 있어야 서비스 구동 가능 (미설치 시 모두 0/양호)
-if rpm -qa | grep -q "telnet-server"; then
-
-    # 2. [inetd] 설정 점검 (U_52_1)
-    if [[ -f "/etc/inetd.conf" ]]; then
-        # 주석 제외하고 telnet 설정이 있으면 취약
-        if grep -v "^#" "/etc/inetd.conf" 2>/dev/null | grep -q "telnet"; then
-            U_52_1=1
-        fi
+# Telnet 서버 패키지 설치 여부 확인
+if rpm -qa | grep -qE "telnet-server|krb5-telnet"; then
+    # 1. [U_52_1] inetd 점검
+    if [ -f "/etc/inetd.conf" ] && grep -v "^#" /etc/inetd.conf | grep -iw "telnet" >/dev/null 2>&1; then
+        U_52_1=1
     fi
 
-    # 3. [xinetd] 설정 점검 (U_52_2)
-    if [[ -f "/etc/xinetd.d/telnet" ]]; then
-        # disable = yes 설정이 없으면 취약
-        if ! grep "disable" "/etc/xinetd.d/telnet" 2>/dev/null | grep -q "yes"; then
-            U_52_2=1
-        fi
+    # 2. [U_52_2] xinetd 점검
+    if [ -f "/etc/xinetd.d/telnet" ] && grep -i "disable" /etc/xinetd.d/telnet | grep -iw "no" >/dev/null 2>&1; then
+        U_52_2=1
     fi
 
-    # 4. [systemd] 점검 (U_52_3)
-    # socket 또는 service 활성화 여부 확인
-    if systemctl is-active telnet.socket >/dev/null 2>&1 || systemctl is-active telnet.service >/dev/null 2>&1; then
+    # 3. [U_52_3] systemd 점검
+    if systemctl is-active --quiet telnet.socket 2>/dev/null || systemctl is-active --quiet telnet.service 2>/dev/null; then
         U_52_3=1
     fi
-
-    # 5. [Process] 점검 (U_52_4)
-    # 실제 프로세스 실행 여부 확인
-    if ps -ef | grep -v grep | grep -q "telnet"; then
-        U_52_4=1
-    fi
 fi
 
-# 6. 전체 취약 여부 판단
-IS_VUL=0
-if [[ $U_52_1 -eq 1 ]] || [[ $U_52_2 -eq 1 ]] || [[ $U_52_3 -eq 1 ]] || [[ $U_52_4 -eq 1 ]]; then
-    IS_VUL=1
+# 4. [U_52_4] 프로세스 점검 (패키지 여부와 상관없이 실제 구동 확인)
+if ps -ef | grep -v "grep" | grep -iE "telnetd|in.telnetd" >/dev/null 2>&1; then
+    U_52_4=1
 fi
 
-# 7. JSON 출력
+[ "$U_52_1" -eq 1 ] || [ "$U_52_2" -eq 1 ] || [ "$U_52_3" -eq 1 ] || [ "$U_52_4" -eq 1 ] && IS_VUL=1
+
 cat <<EOF
 {
-  "meta": {
-    "hostname": "$(hostname)",
-    "ip": "$(hostname -I | awk '{print $1}')",
-    "user": "$(whoami)"
-  },
+  "meta": { "hostname": "$HOSTNAME", "ip": "$IP", "user": "$USER" },
   "result": {
     "flag_id": "U-52",
     "is_vul": $IS_VUL,
-    "is_auto": 1,
+    "is_auto": $IS_AUTO,
     "category": "service",
-    "flag": {
-      "U_52_1": $U_52_1,
-      "U_52_2": $U_52_2,
-      "U_52_3": $U_52_3,
-      "U_52_4": $U_52_4
-    },
-    "timestamp": "$(date "+%Y_%m_%d / %H:%M:%S")"
+    "flag": { "U_52_1": $U_52_1, "U_52_2": $U_52_2, "U_52_3": $U_52_3, "U_52_4": $U_52_4 },
+    "timestamp": "$DATE"
   }
 }
 EOF
