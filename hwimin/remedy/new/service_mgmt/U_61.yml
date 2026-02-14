@@ -1,0 +1,299 @@
+- name: "U_61 | Enforce SNMP Access Control (Controlled Env, Controller-Only Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_61"
+
+    snmp_service: "snmpd"
+    snmpd_conf: "/etc/snmp/snmpd.conf"
+
+    # ===== timestamp formats (controller side) =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # ==============================
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # ==============================
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 미정의 방지
+    # ---------------------------------------------------------
+    - name: "U_61 | init defaults"
+      ansible.builtin.set_fact:
+        distro_like: ""
+        is_debian_like: false
+        is_redhat_like: false
+
+        # input effective
+        snmp_allow_net_effective: ""
+        snmp_community_effective: ""
+        snmp_mode_effective: "ro"
+
+        ready: false
+
+        r_set_redhat: {}
+        r_set_debian_ro: {}
+        r_set_debian_rw: {}
+        r_restart: {}
+
+        u611_changed_any: false
+        u611_status: 0
+        u611_desc: ""
+        u611_result: ""
+        u611_cmd: ""
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) 입력값 정규화 (자기참조 vars 금지)
+    # ---------------------------------------------------------
+    - name: "U_61 | normalize input"
+      ansible.builtin.set_fact:
+        snmp_allow_net_effective: "{{ (snmp_allow_net | default('')) | string }}"
+        snmp_community_effective: "{{ (snmp_community | default('')) | string }}"
+        snmp_mode_effective: "{{ (snmp_mode | default('ro')) | lower }}"
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집 (stdout JSON meta용)
+    # ---------------------------------------------------------
+    - name: "U_61 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_61 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_61 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_61 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) OS 계열 판별 (RedHat/Debian)
+    # ---------------------------------------------------------
+    - name: "U_61 | detect os-release ID_LIKE"
+      ansible.builtin.shell: |
+        if [ -r /etc/os-release ]; then
+          . /etc/os-release
+          echo "${ID_LIKE:-}${ID:+ ${ID}}"
+        else
+          echo ""
+        fi
+      register: r_os_like
+      changed_when: false
+      failed_when: false
+
+    - name: "U_61 | set distro flags + readiness"
+      ansible.builtin.set_fact:
+        distro_like: "{{ (r_os_like.stdout | default('')) | lower }}"
+        is_debian_like: "{{ ('debian' in ((r_os_like.stdout | default('')) | lower)) or ('ubuntu' in ((r_os_like.stdout | default('')) | lower)) }}"
+        is_redhat_like: "{{ ('rhel' in ((r_os_like.stdout | default('')) | lower)) or ('fedora' in ((r_os_like.stdout | default('')) | lower)) or ('centos' in ((r_os_like.stdout | default('')) | lower)) or ('rocky' in ((r_os_like.stdout | default('')) | lower)) }}"
+        ready: >-
+          {{ (snmp_allow_net_effective | length > 0)
+              and (snmp_community_effective | length > 0)
+              and (snmp_mode_effective in ['ro','rw']) }}
+      changed_when: false
+
+    # =========================================================
+    # U_61_1) SNMP 접근 제어 설정
+    # - 입력 미제공/정책 불만족이면: 수동조치로 넘김(로그/JSON만 남김)
+    # =========================================================
+    - name: "U_61 | [U_61_1] enforce SNMP access control + restart + logs/json"
+      block:
+        - name: "U_61_1 | compute cmd (stable)"
+          ansible.builtin.set_fact:
+            u611_cmd: >-
+              {{
+                (ready | bool)
+                | ternary(
+                    (
+                      (is_debian_like | bool)
+                      | ternary(
+                          ("snmpd.conf: " ~ ((snmp_mode_effective == "rw") | ternary("rwcommunity","rocommunity")) ~ " <community> <allow_net>; (if changed) systemctl restart snmpd"),
+                          (
+                            (is_redhat_like | bool)
+                            | ternary("snmpd.conf: com2sec notConfigUser <allow_net> <community>; (if changed) systemctl restart snmpd",
+                                      "OS 계열 불명확(ID_LIKE='" ~ distro_like ~ "')")
+                          )
+                        )
+                    ),
+                    "입력값(snmp_allow_net/snmp_community/snmp_mode) 미제공 또는 정책 불만족 → 수동조치 필요"
+                  )
+              }}
+          changed_when: false
+
+        # ---------- RedHat-like ----------
+        - name: "U_61_1 | RedHat-like | set com2sec notConfigUser <allow_net> <community>"
+          ansible.builtin.lineinfile:
+            path: "{{ snmpd_conf }}"
+            regexp: '^[[:space:]]*com2sec[[:space:]]+notConfigUser[[:space:]]+'
+            line: "com2sec notConfigUser {{ snmp_allow_net_effective }} {{ snmp_community_effective }}"
+            insertafter: EOF
+            create: no
+            backup: yes
+          register: r_set_redhat
+          failed_when: false
+          when:
+            - ready | bool
+            - is_redhat_like | bool
+
+        # ---------- Debian-like ----------
+        - name: "U_61_1 | Debian-like | set rocommunity <community> <allow_net>"
+          ansible.builtin.lineinfile:
+            path: "{{ snmpd_conf }}"
+            regexp: '^[[:space:]]*rocommunity[[:space:]]+'
+            line: "rocommunity {{ snmp_community_effective }} {{ snmp_allow_net_effective }}"
+            insertafter: EOF
+            create: no
+            backup: yes
+          register: r_set_debian_ro
+          failed_when: false
+          when:
+            - ready | bool
+            - is_debian_like | bool
+            - snmp_mode_effective == "ro"
+
+        - name: "U_61_1 | Debian-like | set rwcommunity <community> <allow_net>"
+          ansible.builtin.lineinfile:
+            path: "{{ snmpd_conf }}"
+            regexp: '^[[:space:]]*rwcommunity[[:space:]]+'
+            line: "rwcommunity {{ snmp_community_effective }} {{ snmp_allow_net_effective }}"
+            insertafter: EOF
+            create: no
+            backup: yes
+          register: r_set_debian_rw
+          failed_when: false
+          when:
+            - ready | bool
+            - is_debian_like | bool
+            - snmp_mode_effective == "rw"
+
+        - name: "U_61_1 | compute changed_any"
+          ansible.builtin.set_fact:
+            u611_changed_any: >-
+              {{
+                ((r_set_redhat.changed | default(false)) or
+                 (r_set_debian_ro.changed | default(false)) or
+                 (r_set_debian_rw.changed | default(false))) | bool
+              }}
+          changed_when: false
+
+        - name: "U_61_1 | restart snmpd (only when changed)"
+          ansible.builtin.systemd:
+            name: "{{ snmp_service }}"
+            state: restarted
+          register: r_restart
+          failed_when: false
+          when:
+            - ready | bool
+            - u611_changed_any | bool
+
+        # ---------- status/desc/result ----------
+        - name: "U_61_1 | compute status/description/result (stable)"
+          block:
+            - name: "U_61_1 | compute | init"
+              ansible.builtin.set_fact:
+                u611_status: 0
+                u611_desc: ""
+              changed_when: false
+
+            - name: "U_61_1 | compute | not ready -> manual"
+              ansible.builtin.set_fact:
+                u611_status: 0
+                u611_desc: "입력값이 정책을 만족하지 않아 수동조치로 전환했습니다(snmp_allow_net/snmp_community 제공 필요, snmp_mode: ro|rw)"
+              changed_when: false
+              when: not (ready | bool)
+
+            - name: "U_61_1 | compute | ready but unknown OS"
+              ansible.builtin.set_fact:
+                u611_status: 0
+                u611_desc: "OS 계열 판별이 불명확하여 자동조치를 수행하지 않았습니다(ID_LIKE='{{ distro_like }}')"
+              changed_when: false
+              when:
+                - ready | bool
+                - not (is_debian_like | bool)
+                - not (is_redhat_like | bool)
+
+            - name: "U_61_1 | compute | ready -> applied/verified"
+              ansible.builtin.set_fact:
+                u611_status: 2
+                u611_desc: >-
+                  {{
+                    (u611_changed_any | bool)
+                    | ternary(
+                        "SNMP 접근제어를 정책값으로 적용했습니다(변경 시 snmpd 재시작 포함)",
+                        "SNMP 접근제어 설정이 이미 정책값으로 정합합니다(변경 없음)"
+                      )
+                  }}
+              changed_when: false
+              when:
+                - ready | bool
+                - (is_debian_like | bool) or (is_redhat_like | bool)
+
+            - name: "U_61_1 | compute | finalize result"
+              ansible.builtin.set_fact:
+                u611_result: "{{ ((u611_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+              changed_when: false
+
+        # ---- stderr(log) : UTF8-safe + section 실제 조치내용 ----
+        - name: "U_61_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_611_e.stderr_ts | default("")),
+              "flag_id": "U_61_1",
+              "section": "SNMP 접근제어(com2sec/rocommunity/rwcommunity) 설정 및 snmpd 재시작(변경 시)",
+              "title": "[U_61_1] SNMP 접근제어 적용",
+              "cmd": u611_cmd,
+              "result": u611_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_611_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        # ---- stdout(json) : UTF8-safe ----
+        - name: "U_61_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_61_1",
+                "status": (u611_status | int),
+                "description": u611_desc,
+                "category": "service",
+                "timestamp": (ts_611_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_611_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+
+      when:
+        - "'U_61_1' in (flag_list | default([]))"

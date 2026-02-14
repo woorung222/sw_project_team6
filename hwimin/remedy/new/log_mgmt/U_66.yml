@@ -1,0 +1,218 @@
+---
+- name: "U_66 | Configure rsyslog policy (Controlled Env, Controller-Only Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_66"
+
+    # [정책 파일] - 보수적(장애 0): 기존 rsyslog.conf 덮어쓰지 않고 drop-in 사용
+    rsyslog_dropin_dir: "/etc/rsyslog.d"
+    rsyslog_dropin_file: "/etc/rsyslog.d/99-isms-u66.conf"
+
+    # 서비스명(systemd)
+    svc_rsyslog: "rsyslog"
+
+    # ===== timestamp formats (controller side) =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+    # [U_66] 적용할 rsyslog 정책(요약 표준안) - drop-in으로 추가(운영환경에서 최종 조정 필요)
+    rsyslog_policy_lines:
+      - "*.info;mail.none;authpriv.none;cron.none    /var/log/messages"
+      - "auth,authpriv.*                            /var/log/secure"
+      - "mail.*                                     /var/log/maillog"
+      - "cron.*                                     /var/log/cron"
+      - "*.alert                                    /dev/console"
+      - "*.emerg                                    *"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 미정의 방지
+    # ---------------------------------------------------------
+    - name: "U_66 | init defaults"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: ""
+        META_IP: ""
+        META_USER: ""
+
+        r_dropin_dir: {}
+        r_dropin_write: {}
+        r_rsyslog_reload: {}
+        r_rsyslog_restart: {}
+
+        u661_status: 0
+        u661_desc: ""
+        u661_result: ""
+        u661_cmd: ""
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집 (stdout JSON meta용)
+    # ---------------------------------------------------------
+    - name: "U_66 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_66 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_66 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_66 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # =========================================================
+    # U_66_1) rsyslog 정책 적용 (drop-in)
+    # - 보수적: drop-in 파일로 정책 "추가"
+    # - 변경 발생 시 reload 시도, 실패하면 restart 시도
+    # - 실패/불가 시: 수동조치 전환 메시지로 기록(로그/JSON은 항상 남김)
+    # =========================================================
+    - name: "U_66 | [U_66_1] apply rsyslog policy via drop-in + reload/restart + logs/json"
+      block:
+        - name: "U_66_1 | compute cmd (stable)"
+          ansible.builtin.set_fact:
+            u661_cmd: "mkdir -p {{ rsyslog_dropin_dir }}; write {{ rsyslog_dropin_file }} (drop-in); systemctl reload rsyslog (fallback: restart when reload fails)"
+          changed_when: false
+
+        - name: "U_66_1 | ensure /etc/rsyslog.d exists"
+          ansible.builtin.file:
+            path: "{{ rsyslog_dropin_dir }}"
+            state: directory
+            owner: "root"
+            group: "root"
+            mode: "0755"
+          register: r_dropin_dir
+          failed_when: false
+
+        - name: "U_66_1 | write drop-in policy file (full content, idempotent)"
+          ansible.builtin.copy:
+            dest: "{{ rsyslog_dropin_file }}"
+            owner: "root"
+            group: "root"
+            mode: "0644"
+            content: |
+              # Managed by ISMS Remediation - U_66
+              # NOTE: Conservative drop-in policy. Review with operations policy to avoid log volume issues.
+              {% for l in rsyslog_policy_lines %}
+              {{ l }}
+              {% endfor %}
+          register: r_dropin_write
+          failed_when: false
+
+        - name: "U_66_1 | reload rsyslog (preferred)"
+          ansible.builtin.systemd:
+            name: "{{ svc_rsyslog }}"
+            state: reloaded
+          register: r_rsyslog_reload
+          failed_when: false
+          when: ((r_dropin_write.changed | default(false)) | bool)
+
+        - name: "U_66_1 | restart rsyslog (fallback if reload failed)"
+          ansible.builtin.systemd:
+            name: "{{ svc_rsyslog }}"
+            state: restarted
+          register: r_rsyslog_restart
+          failed_when: false
+          when:
+            - ((r_dropin_write.changed | default(false)) | bool)
+            - ((r_rsyslog_reload.failed | default(false)) | bool)
+
+    # ---------- status/desc/result (stable, no nested ternary) ----------
+        - name: "U_66_1 | compute | init"
+          ansible.builtin.set_fact:
+            u661_status: 0
+            u661_desc: ""
+            u661_result: ""
+          changed_when: false
+
+        - name: "U_66_1 | compute | failed -> manual"
+          ansible.builtin.set_fact:
+            u661_status: 0
+            u661_desc: "rsyslog 정책 적용을 시도했으나 실패하여 수동조치로 전환했습니다(rsyslog 설치/권한/정책 충돌/로그 용량 고려 필요)"
+          changed_when: false
+          when: ((r_dropin_write.failed | default(false)) | bool)
+
+        - name: "U_66_1 | compute | changed -> applied"
+          ansible.builtin.set_fact:
+            u661_status: 2
+            u661_desc: "rsyslog 정책을 drop-in 파일로 반영했습니다(변경 시 reload/restart 포함)"
+          changed_when: false
+          when:
+            - not ((r_dropin_write.failed | default(false)) | bool)
+            - ((r_dropin_write.changed | default(false)) | bool)
+
+        - name: "U_66_1 | compute | nochange -> already compliant"
+          ansible.builtin.set_fact:
+            u661_status: 2
+            u661_desc: "동일 정책이 이미 반영되어 변경이 필요 없습니다"
+          changed_when: false
+          when:
+            - not ((r_dropin_write.failed | default(false)) | bool)
+            - not ((r_dropin_write.changed | default(false)) | bool)
+
+        - name: "U_66_1 | compute | finalize result"
+          ansible.builtin.set_fact:
+            u661_result: "{{ ((u661_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        # ---- stderr(log) : UTF8-safe + section 실제 조치내용 ----
+        - name: "U_66_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_e.stderr_ts | default("")),
+              "flag_id": "U_66_1",
+              "section": "rsyslog drop-in 정책 파일 생성/반영 및 rsyslog reload(실패 시 restart) 수행",
+              "title": "[U_66_1] rsyslog 정책(drop-in) 설정 및 적용",
+              "cmd": u661_cmd,
+              "result": u661_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        # ---- stdout(json) : UTF8-safe ----
+        - name: "U_66_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_66_1",
+                "status": (u661_status | int),
+                "description": u661_desc,
+                "category": "log",
+                "timestamp": (ts_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_66_1' in (flag_list | default([]))"

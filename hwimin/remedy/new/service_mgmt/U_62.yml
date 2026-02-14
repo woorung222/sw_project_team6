@@ -1,0 +1,856 @@
+- name: "U_62 | Set Login Warning Banners for Services (Controlled Env, Controller-Only Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_62"
+
+    # 후보 파일/서비스 경로
+    issue_file: "/etc/issue"
+    motd_file: "/etc/motd"
+    issue_net_file: "/etc/issue.net"
+
+    sshd_config: "/etc/ssh/sshd_config"
+    postfix_main_cf: "/etc/postfix/main.cf"
+
+    exim4_conf_candidates:
+      - "/etc/exim/exim.conf"
+      - "/etc/exim4/exim4.conf"
+
+    vsftpd_conf_candidates:
+      - "/etc/vsftpd.conf"
+      - "/etc/vsftpd/vsftpd.conf"
+
+    proftpd_conf_candidates:
+      - "/etc/proftpd/proftpd.conf"
+      - "/etc/proftpd.conf"
+
+    named_conf_candidates:
+      - "/etc/named.conf"
+      - "/etc/bind/named.conf.options"
+
+    # systemd 서비스명
+    svc_sshd: "sshd"
+    svc_vsftpd: "vsftpd"
+    svc_proftpd: "proftpd"
+    svc_postfix: "postfix"
+    svc_exim4: "exim4"
+    svc_named: "named"
+
+    # ===== timestamp formats (controller side) =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # ==============================
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # ==============================
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 미정의 방지
+    # ---------------------------------------------------------
+    - name: "U_62 | init defaults"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: ""
+        META_IP: ""
+        META_USER: ""
+
+        banner_text_effective: ""
+        ready_banner: false
+
+        exim_conf: ""
+        vsftpd_conf: ""
+        proftpd_conf: ""
+        named_conf: ""
+
+        r_issue: {}
+        r_motd: {}
+        r_issue_net: {}
+        r_sshd_banner: {}
+        r_sshd_restart: {}
+        r_postfix: {}
+        r_postfix_restart: {}
+        r_exim: {}
+        r_exim_restart: {}
+        r_vsftpd: {}
+        r_vsftpd_restart: {}
+        r_proftpd_disp: {}
+        r_proftpd_restart: {}
+        r_named: {}
+        r_named_restart: {}
+
+        u621_status: 0
+        u621_desc: ""
+        u621_result: ""
+
+        u622_status: 0
+        u622_desc: ""
+        u622_result: ""
+
+        u623_status: 0
+        u623_desc: ""
+        u623_result: ""
+
+        u624_status: 0
+        u624_desc: ""
+        u624_result: ""
+
+        u625_status: 0
+        u625_desc: ""
+        u625_result: ""
+
+        u626_status: 0
+        u626_desc: ""
+        u626_result: ""
+
+        u627_status: 0
+        u627_desc: ""
+        u627_result: ""
+
+        u628_status: 0
+        u628_desc: ""
+        u628_result: ""
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) 입력값 정규화 (자기참조 vars 금지)
+    # ---------------------------------------------------------
+    - name: "U_62 | normalize input"
+      ansible.builtin.set_fact:
+        banner_text_effective: "{{ (banner_text | default('')) | string }}"
+        ready_banner: "{{ ((banner_text | default('')) | string | length) > 0 }}"
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집
+    # ---------------------------------------------------------
+    - name: "U_62 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_62 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_62 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_62 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) 설정 파일 선택(존재하는 첫 번째) - Controlled Env: 존재확인(stat) 대신 단순 선택
+    # ---------------------------------------------------------
+    - name: "U_62 | select exim conf"
+      ansible.builtin.shell: |
+        for p in {{ exim4_conf_candidates | join(' ') }}; do
+          [ -f "$p" ] && echo "$p" && exit 0
+        done
+        exit 0
+      register: r_exim_sel
+      changed_when: false
+      failed_when: false
+
+    - name: "U_62 | select vsftpd conf"
+      ansible.builtin.shell: |
+        for p in {{ vsftpd_conf_candidates | join(' ') }}; do
+          [ -f "$p" ] && echo "$p" && exit 0
+        done
+        exit 0
+      register: r_vs_sel
+      changed_when: false
+      failed_when: false
+
+    - name: "U_62 | select proftpd conf"
+      ansible.builtin.shell: |
+        for p in {{ proftpd_conf_candidates | join(' ') }}; do
+          [ -f "$p" ] && echo "$p" && exit 0
+        done
+        exit 0
+      register: r_pf_sel
+      changed_when: false
+      failed_when: false
+
+    - name: "U_62 | select named conf"
+      ansible.builtin.shell: |
+        for p in {{ named_conf_candidates | join(' ') }}; do
+          [ -f "$p" ] && echo "$p" && exit 0
+        done
+        exit 0
+      register: r_nd_sel
+      changed_when: false
+      failed_when: false
+
+    - name: "U_62 | set_fact selected paths"
+      ansible.builtin.set_fact:
+        exim_conf: "{{ r_exim_sel.stdout | default('') }}"
+        vsftpd_conf: "{{ r_vs_sel.stdout | default('') }}"
+        proftpd_conf: "{{ r_pf_sel.stdout | default('') }}"
+        named_conf: "{{ r_nd_sel.stdout | default('') }}"
+      changed_when: false
+
+    # =========================================================
+    # U_62_1) /etc/issue 배너
+    # =========================================================
+    - name: "U_62 | [U_62_1] set /etc/issue banner + logs/json"
+      block:
+        - name: "U_62_1 | write /etc/issue"
+          ansible.builtin.copy:
+            dest: "{{ issue_file }}"
+            content: "{{ banner_text_effective }}\n"
+            owner: "root"
+            group: "root"
+            mode: "0644"
+          register: r_issue
+          failed_when: false
+          when: ready_banner | bool
+
+        - name: "U_62_1 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u621_status: "{{ (ready_banner | bool) | ternary(2, 0) }}"
+            u621_desc: "{{ (ready_banner | bool) | ternary('/etc/issue 배너를 설정했습니다', 'banner_text 미제공으로 수동조치로 전환했습니다') }}"
+            u621_result: "{{ (ready_banner | bool) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_62_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_621_e.stderr_ts | default("")),
+              "flag_id": "U_62_1",
+              "section": "/etc/issue 경고 배너 내용 적용",
+              "title": "[U_62_1] /etc/issue 배너 설정",
+              "cmd": "write banner_text to /etc/issue",
+              "result": u621_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_621_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_62_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_62_1",
+                "status": (u621_status | int),
+                "description": u621_desc,
+                "category": "log",
+                "timestamp": (ts_621_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_621_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_62_1' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_62_2) /etc/motd 배너
+    # =========================================================
+    - name: "U_62 | [U_62_2] set /etc/motd banner + logs/json"
+      block:
+        - name: "U_62_2 | write /etc/motd"
+          ansible.builtin.copy:
+            dest: "{{ motd_file }}"
+            content: "{{ banner_text_effective }}\n"
+            owner: "root"
+            group: "root"
+            mode: "0644"
+          register: r_motd
+          failed_when: false
+          when: ready_banner | bool
+
+        - name: "U_62_2 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u622_status: "{{ (ready_banner | bool) | ternary(2, 0) }}"
+            u622_desc: "{{ (ready_banner | bool) | ternary('/etc/motd 배너를 설정했습니다', 'banner_text 미제공으로 수동조치로 전환했습니다') }}"
+            u622_result: "{{ (ready_banner | bool) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_62_2 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_622_e.stderr_ts | default("")),
+              "flag_id": "U_62_2",
+              "section": "/etc/motd 경고 배너 내용 적용",
+              "title": "[U_62_2] /etc/motd 배너 설정",
+              "cmd": "write banner_text to /etc/motd",
+              "result": u622_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_622_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_62_2 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_62_2",
+                "status": (u622_status | int),
+                "description": u622_desc,
+                "category": "log",
+                "timestamp": (ts_622_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_622_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_62_2' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_62_3) /etc/issue.net(Telnet) 배너
+    # =========================================================
+    - name: "U_62 | [U_62_3] set /etc/issue.net banner + logs/json"
+      block:
+        - name: "U_62_3 | write /etc/issue.net"
+          ansible.builtin.copy:
+            dest: "{{ issue_net_file }}"
+            content: "{{ banner_text_effective }}\n"
+            owner: "root"
+            group: "root"
+            mode: "0644"
+          register: r_issue_net
+          failed_when: false
+          when: ready_banner | bool
+
+        - name: "U_62_3 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u623_status: "{{ (ready_banner | bool) | ternary(2, 0) }}"
+            u623_desc: "{{ (ready_banner | bool) | ternary('/etc/issue.net 배너를 설정했습니다', 'banner_text 미제공으로 수동조치로 전환했습니다') }}"
+            u623_result: "{{ (ready_banner | bool) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_62_3 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_623_e.stderr_ts | default("")),
+              "flag_id": "U_62_3",
+              "section": "/etc/issue.net 경고 배너 내용 적용",
+              "title": "[U_62_3] /etc/issue.net 배너 설정",
+              "cmd": "write banner_text to /etc/issue.net",
+              "result": u623_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_623_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_62_3 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_62_3",
+                "status": (u623_status | int),
+                "description": u623_desc,
+                "category": "log",
+                "timestamp": (ts_623_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_623_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_62_3' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_62_4) SSH Banner(/etc/issue.net) + sshd 재시작(변경 시)
+    # =========================================================
+    - name: "U_62 | [U_62_4] SSH banner + restart + logs/json"
+      block:
+        - name: "U_62_4 | ensure /etc/issue.net written"
+          ansible.builtin.copy:
+            dest: "{{ issue_net_file }}"
+            content: "{{ banner_text_effective }}\n"
+            owner: "root"
+            group: "root"
+            mode: "0644"
+          register: r_issue_net
+          failed_when: false
+          when: ready_banner | bool
+
+        - name: "U_62_4 | set sshd_config Banner"
+          ansible.builtin.lineinfile:
+            path: "{{ sshd_config }}"
+            regexp: '^[[:space:]]*Banner[[:space:]]+'
+            line: "Banner {{ issue_net_file }}"
+            backup: yes
+          register: r_sshd_banner
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - sshd_config is file
+
+        - name: "U_62_4 | restart sshd (only when changed)"
+          ansible.builtin.systemd:
+            name: "{{ svc_sshd }}"
+            state: restarted
+          register: r_sshd_restart
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - ((r_sshd_banner.changed | default(false)) | bool)
+
+        - name: "U_62_4 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u624_status: >-
+              {{
+                (ready_banner | bool)
+                | ternary(
+                    (sshd_config is file) | ternary(2, 0),
+                    0
+                  )
+              }}
+            u624_desc: >-
+              {{
+                (ready_banner | bool)
+                | ternary(
+                    (sshd_config is file)
+                    | ternary("SSH 배너를 설정했습니다(변경 시 sshd 재시작)", "sshd_config가 없어 조치하지 못했습니다"),
+                    "banner_text 미제공으로 수동조치로 전환했습니다"
+                  )
+              }}
+            u624_result: "{{ ((u624_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_62_4 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_624_e.stderr_ts | default("")),
+              "flag_id": "U_62_4",
+              "section": "SSH Banner 지시어 설정(Banner {{ issue_net_file }}) 및 sshd 재시작(변경 시)",
+              "title": "[U_62_4] SSH 배너 설정",
+              "cmd": "write /etc/issue.net; set sshd_config Banner; systemctl restart sshd(변경 시)",
+              "result": u624_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_624_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_62_4 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_62_4",
+                "status": (u624_status | int),
+                "description": u624_desc,
+                "category": "log",
+                "timestamp": (ts_624_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_624_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_62_4' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_62_5) Postfix smtpd_banner + 재시작(변경 시)
+    # =========================================================
+    - name: "U_62 | [U_62_5] postfix smtpd_banner + restart + logs/json"
+      block:
+        - name: "U_62_5 | set postfix smtpd_banner"
+          ansible.builtin.lineinfile:
+            path: "{{ postfix_main_cf }}"
+            regexp: '^[[:space:]]*smtpd_banner[[:space:]]*='
+            line: "smtpd_banner = {{ banner_text_effective }}"
+            backup: yes
+          register: r_postfix
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - postfix_main_cf is file
+
+        - name: "U_62_5 | restart postfix (only when changed)"
+          ansible.builtin.systemd:
+            name: "{{ svc_postfix }}"
+            state: restarted
+          register: r_postfix_restart
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - ((r_postfix.changed | default(false)) | bool)
+
+        - name: "U_62_5 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u625_status: >-
+              {{
+                (ready_banner | bool)
+                | ternary(
+                    (postfix_main_cf is file) | ternary(2, 0),
+                    0
+                  )
+              }}
+            u625_desc: >-
+              {{
+                (ready_banner | bool)
+                | ternary(
+                    (postfix_main_cf is file)
+                    | ternary("Postfix SMTP 배너를 설정했습니다(변경 시 재시작)", "main.cf가 없어 조치하지 못했습니다"),
+                    "banner_text 미제공으로 수동조치로 전환했습니다"
+                  )
+              }}
+            u625_result: "{{ ((u625_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_62_5 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_625_e.stderr_ts | default("")),
+              "flag_id": "U_62_5",
+              "section": "Postfix smtpd_banner 설정 및 postfix 재시작(변경 시)",
+              "title": "[U_62_5] Postfix SMTP 배너 설정",
+              "cmd": "set smtpd_banner in /etc/postfix/main.cf; systemctl restart postfix(변경 시)",
+              "result": u625_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_625_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_62_5 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_62_5",
+                "status": (u625_status | int),
+                "description": u625_desc,
+                "category": "log",
+                "timestamp": (ts_625_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_625_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_62_5' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_62_6) vsftpd ftpd_banner + 재시작(변경 시)
+    # =========================================================
+    - name: "U_62 | [U_62_6] vsftpd ftpd_banner + restart + logs/json"
+      block:
+        - name: "U_62_6 | set vsftpd ftpd_banner"
+          ansible.builtin.lineinfile:
+            path: "{{ vsftpd_conf }}"
+            regexp: '^[[:space:]]*ftpd_banner[[:space:]]*='
+            line: "ftpd_banner={{ banner_text_effective }}"
+            backup: yes
+          register: r_vsftpd
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - (vsftpd_conf | length > 0)
+
+        - name: "U_62_6 | restart vsftpd (only when changed)"
+          ansible.builtin.systemd:
+            name: "{{ svc_vsftpd }}"
+            state: restarted
+          register: r_vsftpd_restart
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - ((r_vsftpd.changed | default(false)) | bool)
+
+        - name: "U_62_6 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u626_status: "{{ (ready_banner | bool) | ternary(((vsftpd_conf | length > 0) | ternary(2, 0)), 0) }}"
+            u626_desc: >-
+              {{
+                (ready_banner | bool)
+                | ternary(
+                    ((vsftpd_conf | length > 0))
+                    | ternary("vsftpd FTP 배너를 설정했습니다(변경 시 재시작)", "vsftpd 설정 파일이 없어 조치하지 못했습니다"),
+                    "banner_text 미제공으로 수동조치로 전환했습니다"
+                  )
+              }}
+            u626_result: "{{ ((u626_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_62_6 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_626_e.stderr_ts | default("")),
+              "flag_id": "U_62_6",
+              "section": "vsftpd ftpd_banner 설정 및 vsftpd 재시작(변경 시)",
+              "title": "[U_62_6] vsftpd FTP 배너 설정",
+              "cmd": "set ftpd_banner in vsftpd conf; systemctl restart vsftpd(변경 시)",
+              "result": u626_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_626_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_62_6 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_62_6",
+                "status": (u626_status | int),
+                "description": u626_desc,
+                "category": "log",
+                "timestamp": (ts_626_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_626_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_62_6' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_62_7) ProFTPD DisplayLogin(/etc/issue.net) + 재시작(변경 시)
+    # =========================================================
+    - name: "U_62 | [U_62_7] proftpd DisplayLogin + restart + logs/json"
+      block:
+        - name: "U_62_7 | ensure /etc/issue.net written"
+          ansible.builtin.copy:
+            dest: "{{ issue_net_file }}"
+            content: "{{ banner_text_effective }}\n"
+            owner: "root"
+            group: "root"
+            mode: "0644"
+          register: r_issue_net
+          failed_when: false
+          when: ready_banner | bool
+
+        - name: "U_62_7 | set proftpd DisplayLogin"
+          ansible.builtin.lineinfile:
+            path: "{{ proftpd_conf }}"
+            regexp: '^[[:space:]]*DisplayLogin[[:space:]]+'
+            line: "DisplayLogin {{ issue_net_file }}"
+            backup: yes
+          register: r_proftpd_disp
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - (proftpd_conf | length > 0)
+
+        - name: "U_62_7 | restart proftpd (only when changed)"
+          ansible.builtin.systemd:
+            name: "{{ svc_proftpd }}"
+            state: restarted
+          register: r_proftpd_restart
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - ((r_proftpd_disp.changed | default(false)) | bool)
+
+        - name: "U_62_7 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u627_status: "{{ (ready_banner | bool) | ternary(((proftpd_conf | length > 0) | ternary(2, 0)), 0) }}"
+            u627_desc: >-
+              {{
+                (ready_banner | bool)
+                | ternary(
+                    ((proftpd_conf | length > 0))
+                    | ternary("ProFTPD 배너를 설정했습니다(변경 시 재시작)", "ProFTPD 설정 파일이 없어 조치하지 못했습니다"),
+                    "banner_text 미제공으로 수동조치로 전환했습니다"
+                  )
+              }}
+            u627_result: "{{ ((u627_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_62_7 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_627_e.stderr_ts | default("")),
+              "flag_id": "U_62_7",
+              "section": "ProFTPD DisplayLogin 경로 설정(DisplayLogin {{ issue_net_file }}) 및 proftpd 재시작(변경 시)",
+              "title": "[U_62_7] ProFTPD 배너 설정",
+              "cmd": "write /etc/issue.net; set DisplayLogin /etc/issue.net; systemctl restart proftpd(변경 시)",
+              "result": u627_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_627_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_62_7 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_62_7",
+                "status": (u627_status | int),
+                "description": u627_desc,
+                "category": "log",
+                "timestamp": (ts_627_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_627_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_62_7' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_62_8) DNS(named) version 배너 설정 + 재시작(변경 시)
+    # =========================================================
+    - name: "U_62 | [U_62_8] named version banner + restart + logs/json"
+      block:
+        - name: "U_62_8 | set named version"
+          ansible.builtin.lineinfile:
+            path: "{{ named_conf }}"
+            regexp: '^[[:space:]]*version[[:space:]]+'
+            line: "version \"{{ banner_text_effective }}\";"
+            insertafter: EOF
+            backup: yes
+          register: r_named
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - (named_conf | length > 0)
+
+        - name: "U_62_8 | restart named (only when changed)"
+          ansible.builtin.systemd:
+            name: "{{ svc_named }}"
+            state: restarted
+          register: r_named_restart
+          failed_when: false
+          when:
+            - ready_banner | bool
+            - ((r_named.changed | default(false)) | bool)
+
+        - name: "U_62_8 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u628_status: "{{ (ready_banner | bool) | ternary(((named_conf | length > 0) | ternary(2, 0)), 0) }}"
+            u628_desc: >-
+              {{
+                (ready_banner | bool)
+                | ternary(
+                    ((named_conf | length > 0))
+                    | ternary("named version 배너를 설정했습니다(변경 시 재시작)", "named 설정 파일이 없어 조치하지 못했습니다"),
+                    "banner_text 미제공으로 수동조치로 전환했습니다"
+                  )
+              }}
+            u628_result: "{{ ((u628_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_62_8 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_628_e.stderr_ts | default("")),
+              "flag_id": "U_62_8",
+              "section": "DNS(named) version 문자열 설정 및 named 재시작(변경 시)",
+              "title": "[U_62_8] DNS(named) version 배너 설정",
+              "cmd": "set version \"<banner>\"; in named conf; systemctl restart named(변경 시)",
+              "result": u628_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_628_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_62_8 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_62_8",
+                "status": (u628_status | int),
+                "description": u628_desc,
+                "category": "log",
+                "timestamp": (ts_628_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_628_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_62_8' in (flag_list | default([]))"

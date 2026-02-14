@@ -1,0 +1,151 @@
+---
+- name: "U_63 | Fix /etc/sudoers Ownership & Permissions (Controlled Env, Controller-Only Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_63"
+
+    sudoers_file: "/etc/sudoers"
+    target_owner: "root"
+    target_group: "root"
+    target_mode: "0640"
+
+    # ===== timestamp formats (controller side) =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # ==============================
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # ==============================
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 미정의 방지
+    # ---------------------------------------------------------
+    - name: "U_63 | init defaults"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: ""
+        META_IP: ""
+        META_USER: ""
+
+        r_fix_sudoers: {}
+
+        u631_status: 0
+        u631_desc: ""
+        u631_result: ""
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집 (stdout JSON meta용)
+    # ---------------------------------------------------------
+    - name: "U_63 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_63 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_63 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_63 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # =========================================================
+    # U_63_1) /etc/sudoers 소유자 root, 권한 0640
+    # - 실패/불가 시: 수동조치로 전환(로그/JSON 기록)
+    # =========================================================
+    - name: "U_63 | [U_63_1] fix /etc/sudoers owner/mode + logs/json"
+      block:
+        - name: "U_63_1 | enforce owner/group/mode"
+          ansible.builtin.file:
+            path: "{{ sudoers_file }}"
+            owner: "{{ target_owner }}"
+            group: "{{ target_group }}"
+            mode: "{{ target_mode }}"
+          register: r_fix_sudoers
+          failed_when: false
+
+        - name: "U_63_1 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u631_status: >-
+              {{
+                ((r_fix_sudoers.failed | default(false)) | bool)
+                | ternary(0, 2)
+              }}
+            u631_desc: >-
+              {{
+                ((r_fix_sudoers.failed | default(false)) | bool)
+                | ternary(
+                    "/etc/sudoers 조치를 시도했으나 실패하여 수동조치로 전환했습니다",
+                    (
+                      ((r_fix_sudoers.changed | default(false)) | bool)
+                      | ternary(
+                          "/etc/sudoers 소유자/권한을 root:root 0640으로 변경했습니다",
+                          "이미 root:root 0640 상태여서 변경이 필요 없습니다"
+                        )
+                    )
+                  )
+              }}
+            u631_result: "{{ ((u631_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        # ---- stderr(log) : UTF8-safe + section 실제 조치내용 ----
+        - name: "U_63_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_631_e.stderr_ts | default("")),
+              "flag_id": "U_63_1",
+              "section": "/etc/sudoers 소유자(root:root) 및 권한(0640) 강제 설정",
+              "title": "[U_63_1] /etc/sudoers 파일 소유자/권한 설정",
+              "cmd": "chown root:root /etc/sudoers; chmod 640 /etc/sudoers (ansible file 모듈로 적용)",
+              "result": u631_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_631_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        # ---- stdout(json) : UTF8-safe ----
+        - name: "U_63_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_63_1",
+                "status": (u631_status | int),
+                "description": u631_desc,
+                "category": "service",
+                "timestamp": (ts_631_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_631_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_63_1' in (flag_list | default([]))"

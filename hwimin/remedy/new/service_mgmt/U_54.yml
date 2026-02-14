@@ -1,0 +1,371 @@
+- name: "U_54 | Remediate Unencrypted FTP Services (Controlled Env, Logs+JSON to /tmp, Stream-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_54"
+
+    inetd_conf: "/etc/inetd.conf"
+    xinetd_ftp_conf: "/etc/xinetd.d/ftp"
+
+    # ===== timestamp formats =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # ==============================
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # ==============================
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 기본값: 스킵/실패로 미정의 터짐 방지
+    # ---------------------------------------------------------
+    - name: "U_54 | init defaults"
+      ansible.builtin.set_fact:
+        r_inetd_comment: {}
+        r_inetd_restart: {}
+        r_xinetd_disable: {}
+        r_xinetd_restart: {}
+        r_vsftpd: {}
+        r_proftpd: {}
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집 (stdout JSON meta용)
+    # ---------------------------------------------------------
+    - name: "U_54 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_54 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_54 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_54 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # =========================================================
+    # U_54_1) inetd: /etc/inetd.conf 내 ftp 라인 주석 처리
+    # =========================================================
+    - name: "U_54 | [U_54_1] inetd.conf ftp 라인 주석 처리 + 로그/JSON"
+      block:
+        - name: "U_54_1 | replace ftp line -> comment"
+          ansible.builtin.replace:
+            path: "{{ inetd_conf }}"
+            regexp: '^(?![[:space:]]*#)([[:space:]]*ftp[[:space:]].*)$'
+            replace: '# \1'
+            backup: yes
+          register: r_inetd_comment
+          when: inetd_conf is file
+
+        - name: "U_54_1 | inetd restart (only when changed)"
+          ansible.builtin.systemd:
+            name: "inetd"
+            state: restarted
+          when:
+            - inetd_conf is file
+            - ((r_inetd_comment.changed | default(false)) | bool)
+          register: r_inetd_restart
+          failed_when: false
+
+        - name: "U_54_1 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u541_status: "{{ (inetd_conf is file) | ternary(2, 0) }}"
+            u541_desc: >-
+              {{ (inetd_conf is file)
+                 | ternary(
+                     ( ((r_inetd_comment.changed | default(false)) | bool)
+                       | ternary("/etc/inetd.conf의 ftp 라인을 주석 처리했습니다",
+                                 "이미 /etc/inetd.conf의 ftp 라인이 주석 상태입니다")
+                     ),
+                     "/etc/inetd.conf 파일이 없어 조치할 수 없습니다"
+                   )
+              }}
+            u541_result: "{{ ((inetd_conf is file) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)')) }}"
+            u541_cmd: "replace: regexp=^(?!#)(\\s*ftp\\s.*)$ -> '# \\1' @ /etc/inetd.conf; systemd inetd restart(변경 시)"
+          changed_when: false
+
+        - name: "U_54_1 | emit stderr log JSON (controller + stderr stream)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_541_e.stderr_ts | default("")),
+              "flag_id": "U_54_1",
+              "section": "/etc/inetd.conf 내 ftp 서비스 라인 주석 처리",
+              "title": "[U_54_1] /etc/inetd.conf 파일의 설정값 변경(주석처리)",
+              "cmd": u541_cmd,
+              "result": u541_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False, separators=(",",":")))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_541_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_54_1 | emit stdout result JSON (controller + stdout stream)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {
+                "hostname": META_HOSTNAME,
+                "ip": META_IP,
+                "user": META_USER
+              },
+              "result": {
+                "flag_id": "U_54_1",
+                "status": (u541_status | int),
+                "description": u541_desc,
+                "category": "service",
+                "timestamp": (ts_541_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False, separators=(",",":")))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_541_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_54_1' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_54_2) xinetd: /etc/xinetd.d/ftp disable = yes
+    # =========================================================
+    - name: "U_54 | [U_54_2] xinetd ftp disable=yes + 로그/JSON"
+      block:
+        - name: "U_54_2 | set disable=yes"
+          ansible.builtin.lineinfile:
+            path: "{{ xinetd_ftp_conf }}"
+            regexp: '^[[:space:]]*disable[[:space:]]*='
+            line: '        disable = yes'
+            backup: yes
+            create: no
+          register: r_xinetd_disable
+          when: xinetd_ftp_conf is file
+
+        - name: "U_54_2 | xinetd restart (only when changed)"
+          ansible.builtin.systemd:
+            name: "xinetd"
+            state: restarted
+          when:
+            - xinetd_ftp_conf is file
+            - ((r_xinetd_disable.changed | default(false)) | bool)
+          register: r_xinetd_restart
+          failed_when: false
+
+        - name: "U_54_2 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u542_status: "{{ (xinetd_ftp_conf is file) | ternary(2, 0) }}"
+            u542_desc: >-
+              {{ (xinetd_ftp_conf is file)
+                 | ternary(
+                     ( ((r_xinetd_disable.changed | default(false)) | bool)
+                       | ternary("/etc/xinetd.d/ftp의 disable 값을 yes로 변경했습니다",
+                                 "이미 /etc/xinetd.d/ftp의 disable 값이 yes 상태입니다")
+                     ),
+                     "/etc/xinetd.d/ftp 파일이 없어 조치할 수 없습니다"
+                   )
+              }}
+            u542_result: "{{ ((xinetd_ftp_conf is file) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)')) }}"
+            u542_cmd: "lineinfile: disable=yes @ /etc/xinetd.d/ftp; systemd xinetd restart(변경 시)"
+          changed_when: false
+
+        - name: "U_54_2 | emit stderr log JSON (controller + stderr stream)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_542_e.stderr_ts | default("")),
+              "flag_id": "U_54_2",
+              "section": "/etc/xinetd.d/ftp 파일에서 disable = yes 설정",
+              "title": "[U_54_2] /etc/xinetd.d/ftp 파일의 설정값 변경(disable=yes)",
+              "cmd": u542_cmd,
+              "result": u542_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False, separators=(",",":")))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_542_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_54_2 | emit stdout result JSON (controller + stdout stream)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {
+                "hostname": META_HOSTNAME,
+                "ip": META_IP,
+                "user": META_USER
+              },
+              "result": {
+                "flag_id": "U_54_2",
+                "status": (u542_status | int),
+                "description": u542_desc,
+                "category": "service",
+                "timestamp": (ts_542_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False, separators=(",",":")))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_542_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_54_2' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_54_3) vsftpd: stop + disable
+    # =========================================================
+    - name: "U_54 | [U_54_3] vsftpd stop+disable + 로그/JSON"
+      block:
+        - name: "U_54_3 | vsftpd systemd stop/disable"
+          ansible.builtin.systemd:
+            name: "vsftpd"
+            state: stopped
+            enabled: false
+          register: r_vsftpd
+          failed_when: false
+
+        - name: "U_54_3 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u543_status: "{{ ((r_vsftpd.failed | default(false)) | bool) | ternary(0, 2) }}"
+            u543_desc: "{{ ((r_vsftpd.failed | default(false)) | bool) | ternary('vsFTP 서비스 제어에 실패하여 조치할 수 없습니다', 'vsFTP 서비스 중지 및 비활성화 완료') }}"
+            u543_result: "{{ ((r_vsftpd.failed | default(false)) | bool) | ternary('조치 불가 (status: 0)', '조치 성공 (status: 2)') }}"
+            u543_cmd: "systemd: name=vsftpd state=stopped enabled=false"
+          changed_when: false
+
+        - name: "U_54_3 | emit stderr log JSON (controller + stderr stream)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_543_e.stderr_ts | default("")),
+              "flag_id": "U_54_3",
+              "section": "vsftpd 서비스 중지 및 비활성화",
+              "title": "[U_54_3] vsFTP 서비스 중지 및 비활성화",
+              "cmd": u543_cmd,
+              "result": u543_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False, separators=(",",":")))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_543_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_54_3 | emit stdout result JSON (controller + stdout stream)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {
+                "hostname": META_HOSTNAME,
+                "ip": META_IP,
+                "user": META_USER
+              },
+              "result": {
+                "flag_id": "U_54_3",
+                "status": (u543_status | int),
+                "description": u543_desc,
+                "category": "service",
+                "timestamp": (ts_543_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False, separators=(",",":")))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_543_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_54_3' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_54_4) proftpd: stop + disable
+    # =========================================================
+    - name: "U_54 | [U_54_4] proftpd stop+disable + 로그/JSON"
+      block:
+        - name: "U_54_4 | proftpd systemd stop/disable"
+          ansible.builtin.systemd:
+            name: "proftpd"
+            state: stopped
+            enabled: false
+          register: r_proftpd
+          failed_when: false
+
+        - name: "U_54_4 | compute status/description/result"
+          ansible.builtin.set_fact:
+            u544_status: "{{ ((r_proftpd.failed | default(false)) | bool) | ternary(0, 2) }}"
+            u544_desc: "{{ ((r_proftpd.failed | default(false)) | bool) | ternary('ProFTP 서비스 제어에 실패하여 조치할 수 없습니다', 'ProFTP 서비스 중지 및 비활성화 완료') }}"
+            u544_result: "{{ ((r_proftpd.failed | default(false)) | bool) | ternary('조치 불가 (status: 0)', '조치 성공 (status: 2)') }}"
+            u544_cmd: "systemd: name=proftpd state=stopped enabled=false"
+          changed_when: false
+
+        - name: "U_54_4 | emit stderr log JSON (controller + stderr stream)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_544_e.stderr_ts | default("")),
+              "flag_id": "U_54_4",
+              "section": "proftpd 서비스 중지 및 비활성화",
+              "title": "[U_54_4] ProFTP 서비스 중지 및 비활성화",
+              "cmd": u544_cmd,
+              "result": u544_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False, separators=(",",":")))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_544_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_54_4 | emit stdout result JSON (controller + stdout stream)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {
+                "hostname": META_HOSTNAME,
+                "ip": META_IP,
+                "user": META_USER
+              },
+              "result": {
+                "flag_id": "U_54_4",
+                "status": (u544_status | int),
+                "description": u544_desc,
+                "category": "service",
+                "timestamp": (ts_544_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False, separators=(",",":")))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_544_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_54_4' in (flag_list | default([]))"

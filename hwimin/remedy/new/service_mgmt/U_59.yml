@@ -1,0 +1,370 @@
+- name: "U_59 | Enforce SNMPv3 (Controlled Env, Logs+JSON to /tmp, Stream-Split, UTF8-safe, Host-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_59"
+
+    # 대상 서비스/설정 파일
+    snmp_service: "snmpd"
+    snmpd_conf: "/etc/snmp/snmpd.conf"
+
+    # ===== SNMPv3 입력 변수(값이 있어야만 자동 반영) =====
+    # 값 미제공 시: 자동조치 불가 → 수동조치로 넘기고 계속 진행(팀 조건)
+    snmpv3_user: "{{ snmpv3_user | default('') }}"
+    snmpv3_auth_proto: "{{ snmpv3_auth_proto | default('') }}"   # 예: SHA
+    snmpv3_auth_pass: "{{ snmpv3_auth_pass | default('') }}"     # 예: myauthpass
+    snmpv3_priv_proto: "{{ snmpv3_priv_proto | default('') }}"   # 예: AES
+    snmpv3_priv_pass: "{{ snmpv3_priv_pass | default('') }}"     # 예: myprivpass
+
+    # 권한: ro/rw (기본 ro)
+    snmpv3_access: "{{ snmpv3_access | default('ro') }}"         # ro 또는 rw
+
+    # ===== timestamp formats =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # ==============================
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # ==============================
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 미정의 방지 (status/desc/result/cmd 포함)
+    # ---------------------------------------------------------
+    - name: "U_59 | init defaults"
+      ansible.builtin.set_fact:
+        r_snmp_active: {}
+        r_snmp_enabled: {}
+        r_snmp_stop: {}
+        r_snmp_disable: {}
+
+        r_v3_create: {}
+        r_conf_createuser: {}
+        r_conf_access: {}
+        r_snmp_restart: {}
+
+        v3_ready: false
+        v3_cmd: ""
+        v3_access_line: ""
+
+        u591_cmd: ""
+        u591_status: 0
+        u591_desc: ""
+        u591_result: ""
+
+        u592_cmd: ""
+        u592_status: 0
+        u592_desc: ""
+        u592_result: ""
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집 (stdout JSON meta용)
+    # ---------------------------------------------------------
+    - name: "U_59 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_59 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_59 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_59 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # =========================================================
+    # U_59_1) SNMP 서비스를 사용하지 않는 경우: 서비스 중지 및 비활성화
+    # =========================================================
+    - name: "U_59 | [U_59_1] snmpd stop+disable (UTF8-safe logs/json)"
+      block:
+        - name: "U_59_1 | check is-active snmpd"
+          ansible.builtin.command: "systemctl is-active {{ snmp_service }}"
+          register: r_snmp_active
+          changed_when: false
+          failed_when: false
+
+        - name: "U_59_1 | check is-enabled snmpd"
+          ansible.builtin.command: "systemctl is-enabled {{ snmp_service }}"
+          register: r_snmp_enabled
+          changed_when: false
+          failed_when: false
+
+        - name: "U_59_1 | stop snmpd (only when active)"
+          ansible.builtin.systemd:
+            name: "{{ snmp_service }}"
+            state: stopped
+          register: r_snmp_stop
+          failed_when: false
+          when: (r_snmp_active.stdout | default('')) == "active"
+
+        - name: "U_59_1 | disable snmpd (only when enabled)"
+          ansible.builtin.systemd:
+            name: "{{ snmp_service }}"
+            enabled: false
+          register: r_snmp_disable
+          failed_when: false
+          when: (r_snmp_enabled.stdout | default('')) == "enabled"
+
+        - name: "U_59_1 | compute status/description/cmd (stable)"
+          block:
+            - name: "U_59_1 | compute | init"
+              ansible.builtin.set_fact:
+                u591_cmd: "systemctl is-active {{ snmp_service }}; systemctl is-enabled {{ snmp_service }}; (if active) systemctl stop {{ snmp_service }}; (if enabled) systemctl disable {{ snmp_service }}"
+                u591_status: 0
+                u591_desc: ""
+              changed_when: false
+
+            - name: "U_59_1 | compute | service missing or query failed"
+              ansible.builtin.set_fact:
+                u591_status: 0
+                u591_desc: "snmpd 서비스가 존재하지 않거나 상태 조회가 불가하여 조치하지 않았습니다"
+              changed_when: false
+              when:
+                - (r_snmp_active.rc | default(0) | int) != 0
+                - (r_snmp_enabled.rc | default(0) | int) != 0
+
+            - name: "U_59_1 | compute | already inactive/disabled"
+              ansible.builtin.set_fact:
+                u591_status: 2
+                u591_desc: "snmpd 서비스가 이미 비활성/중지 상태여서 조치가 필요 없습니다"
+              changed_when: false
+              when:
+                - not ((r_snmp_active.rc | default(0) | int) != 0 and (r_snmp_enabled.rc | default(0) | int) != 0)
+                - (r_snmp_active.stdout | default('')) != "active"
+                - (r_snmp_enabled.stdout | default('')) != "enabled"
+
+            - name: "U_59_1 | compute | attempted stop/disable"
+              ansible.builtin.set_fact:
+                u591_status: 2
+                u591_desc: >-
+                  {% set stop_failed = (r_snmp_stop.failed | default(false)) | bool %}
+                  {% set dis_failed  = (r_snmp_disable.failed | default(false)) | bool %}
+                  {% if stop_failed or dis_failed %}
+                  snmpd 서비스가 활성/사용 상태여서 중지/비활성화를 시도했으나 일부 작업이 실패했습니다(stop_failed={{ stop_failed }}, disable_failed={{ dis_failed }})
+                  {% else %}
+                  snmpd 서비스가 활성 상태여서 중지/비활성화를 적용했습니다
+                  {% endif %}
+              changed_when: false
+              when:
+                - not ((r_snmp_active.rc | default(0) | int) != 0 and (r_snmp_enabled.rc | default(0) | int) != 0)
+                - ((r_snmp_active.stdout | default('')) == "active") or ((r_snmp_enabled.stdout | default('')) == "enabled")
+
+            - name: "U_59_1 | compute | result string"
+              ansible.builtin.set_fact:
+                u591_result: "{{ ((u591_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+              changed_when: false
+
+        - name: "U_59_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_591_e.stderr_ts | default("")),
+              "flag_id": "U_59_1",
+              "section": "SNMP(snmpd) 서비스 중지 및 비활성화",
+              "title": "[U_59_1] SNMP(snmpd) 서비스 중지 및 비활성화",
+              "cmd": u591_cmd,
+              "result": u591_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_591_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_59_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_59_1",
+                "status": (u591_status | int),
+                "description": u591_desc,
+                "category": "service",
+                "timestamp": (ts_591_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_591_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_59_1' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_59_2) SNMP 서비스를 사용하는 경우: SNMPv3 적용
+    # - 값 미제공 시: status=0 + 수동조치 안내(팀 조건) + 계속 진행
+    # - 값 제공 시: v3 사용자 생성 시도 + snmpd.conf 반영 + (변경 시) 재시작
+    # =========================================================
+    - name: "U_59 | [U_59_2] enforce SNMPv3 user + config + restart (UTF8-safe logs/json)"
+      block:
+        - name: "U_59_2 | compute readiness + commands"
+          ansible.builtin.set_fact:
+            v3_ready: >-
+              {{
+                (snmpv3_user | length > 0)
+                and (snmpv3_auth_proto | length > 0)
+                and (snmpv3_auth_pass | length > 0)
+                and (snmpv3_priv_proto | length > 0)
+                and (snmpv3_priv_pass | length > 0)
+                and ((snmpv3_access | lower) in ["ro","rw"])
+              }}
+            v3_cmd: >-
+              net-snmp-create-v3-user
+              -{{ (snmpv3_access | lower) }}
+              -a {{ snmpv3_auth_proto }} -A '{{ snmpv3_auth_pass }}'
+              -x {{ snmpv3_priv_proto }} -X '{{ snmpv3_priv_pass }}'
+              {{ snmpv3_user }}
+            v3_access_line: >-
+              {{
+                ((snmpv3_access | lower) == "rw")
+                | ternary("rwuser " ~ snmpv3_user, "rouser " ~ snmpv3_user)
+              }}
+          changed_when: false
+
+        - name: "U_59_2 | create SNMPv3 user (net-snmp-create-v3-user) (only when inputs provided)"
+          ansible.builtin.shell: "{{ v3_cmd }}"
+          register: r_v3_create
+          changed_when: true
+          failed_when: false
+          when: v3_ready | bool
+
+        - name: "U_59_2 | ensure createUser in snmpd.conf (only when inputs provided)"
+          ansible.builtin.lineinfile:
+            path: "{{ snmpd_conf }}"
+            regexp: "^[[:space:]]*createUser[[:space:]]+{{ snmpv3_user }}\\b"
+            line: "createUser {{ snmpv3_user }} {{ snmpv3_auth_proto }} {{ snmpv3_auth_pass }} {{ snmpv3_priv_proto }} {{ snmpv3_priv_pass }}"
+            insertafter: EOF
+            create: no
+            backup: yes
+          register: r_conf_createuser
+          failed_when: false
+          when: v3_ready | bool
+
+        - name: "U_59_2 | ensure rouser/rwuser in snmpd.conf (only when inputs provided)"
+          ansible.builtin.lineinfile:
+            path: "{{ snmpd_conf }}"
+            regexp: "^[[:space:]]*(rouser|rwuser)[[:space:]]+{{ snmpv3_user }}\\b"
+            line: "{{ v3_access_line }}"
+            insertafter: EOF
+            create: no
+            backup: yes
+          register: r_conf_access
+          failed_when: false
+          when: v3_ready | bool
+
+        - name: "U_59_2 | restart snmpd (only when changed/attempted)"
+          ansible.builtin.systemd:
+            name: "{{ snmp_service }}"
+            state: restarted
+          register: r_snmp_restart
+          failed_when: false
+          when:
+            - v3_ready | bool
+            - ((r_v3_create.changed | default(false)) | bool)
+              or ((r_conf_createuser.changed | default(false)) | bool)
+              or ((r_conf_access.changed | default(false)) | bool)
+
+        - name: "U_59_2 | compute status/description/cmd (stable)"
+          block:
+            - name: "U_59_2 | compute | init"
+              ansible.builtin.set_fact:
+                u592_cmd: "SNMPv3 입력값 확인; (ready 시) net-snmp-create-v3-user ...; edit {{ snmpd_conf }}(createUser/rouser|rwuser); (if changed) systemctl restart {{ snmp_service }}"
+                u592_status: 0
+                u592_desc: ""
+              changed_when: false
+
+            - name: "U_59_2 | compute | not ready -> manual"
+              ansible.builtin.set_fact:
+                u592_status: 0
+                u592_desc: "SNMPv3 자동조치에 필요한 입력값이 없어 수동조치로 전환했습니다"
+              changed_when: false
+              when: not (v3_ready | bool)
+
+            - name: "U_59_2 | compute | ready -> success/partial"
+              ansible.builtin.set_fact:
+                u592_status: 2
+                u592_desc: >-
+                  {% set create_ok = ((r_v3_create.rc | default(1) | int) == 0) %}
+                  {% set cu_fail = (r_conf_createuser.failed | default(false)) | bool %}
+                  {% set ac_fail = (r_conf_access.failed | default(false)) | bool %}
+                  {% if create_ok and (not cu_fail) and (not ac_fail) %}
+                  SNMPv3 사용자 생성 및 snmpd.conf 반영을 수행했습니다(변경 시 재시작 포함)
+                  {% else %}
+                  SNMPv3 적용을 시도했으나 일부 실패 가능 → 로그 기반으로 담당자 확인 필요
+                  {% endif %}
+              changed_when: false
+              when: v3_ready | bool
+
+            - name: "U_59_2 | compute | result string"
+              ansible.builtin.set_fact:
+                u592_result: "{{ ((u592_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+              changed_when: false
+
+        - name: "U_59_2 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_592_e.stderr_ts | default("")),
+              "flag_id": "U_59_2",
+              "section": "SNMPv3 적용(입력값 기반 사용자 생성 및 snmpd.conf 반영)",
+              "title": "[U_59_2] SNMPv3 적용(사용자 생성 및 snmpd.conf 반영)",
+              "cmd": (
+                (v3_ready | bool)
+                | ternary(u592_cmd, "입력값 미제공으로 자동조치 불가 → 수동조치 필요")
+              ),
+              "result": u592_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_592_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        - name: "U_59_2 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_59_2",
+                "status": (u592_status | int),
+                "description": u592_desc,
+                "category": "service",
+                "timestamp": (ts_592_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_592_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_59_2' in (flag_list | default([]))"

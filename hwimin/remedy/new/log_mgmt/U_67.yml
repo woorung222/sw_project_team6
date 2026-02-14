@@ -1,0 +1,203 @@
+- name: "U_67 | Fix /var/log Log Files Owner & Permissions (Controlled Env, Controller-Only Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_67"
+
+    log_dir_path: "/var/log"
+    target_owner: "root"
+    target_group: "root"
+    target_mode: "0644"
+
+    # ===== timestamp formats =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # ==============================
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # ==============================
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 미정의 방지
+    # ---------------------------------------------------------
+    - name: "U_67 | init defaults"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: ""
+        META_IP: ""
+        META_USER: ""
+
+        logdir_exists: false
+        vuln_files: []
+
+        r_find_vuln: {}
+        r_fix_files: {}
+
+        u671_status: 0
+        u671_desc: ""
+        u671_result: ""
+        u671_cmd: ""
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집 (stdout JSON meta용)
+    # ---------------------------------------------------------
+    - name: "U_67 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_67 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_67 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_67 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # =========================================================
+    # U_67_1) /var/log 내 로그 파일 소유자(root) 및 권한(0644) 설정
+    # - 점검 기준(스크립트 기반):
+    #   - owner != root OR group/other writable (-perm /022)
+    # - 조치:
+    #   - chown root:root, chmod 644
+    # =========================================================
+    - name: "U_67 | [U_67_1] fix /var/log log file owner/mode + logs/json"
+      block:
+        - name: "U_67_1 | compute cmd (stable)"
+          ansible.builtin.set_fact:
+            u671_cmd: "find /var/log -type f (owner!=root OR perm /022) then chown root:root; chmod 644"
+          changed_when: false
+
+        - name: "U_67_1 | check /var/log exists"
+          ansible.builtin.stat:
+            path: "{{ log_dir_path }}"
+          register: st_logdir
+          changed_when: false
+          failed_when: false
+
+        - name: "U_67_1 | set logdir_exists"
+          ansible.builtin.set_fact:
+            logdir_exists: "{{ (st_logdir.stat.isdir | default(false)) | bool }}"
+          changed_when: false
+
+        - name: "U_67_1 | find violating files (owner != root OR perm /022)"
+          ansible.builtin.shell: |
+            set -o pipefail
+            find "{{ log_dir_path }}" -type f \( -not -user root -o -perm /022 \) -print 2>/dev/null || true
+          register: r_find_vuln
+          changed_when: false
+          failed_when: false
+          when: logdir_exists | bool
+
+        - name: "U_67_1 | set vuln_files list"
+          ansible.builtin.set_fact:
+            vuln_files: "{{ (r_find_vuln.stdout_lines | default([])) }}"
+          changed_when: false
+
+        - name: "U_67_1 | enforce owner/group/mode on violating files"
+          ansible.builtin.file:
+            path: "{{ item }}"
+            owner: "{{ target_owner }}"
+            group: "{{ target_group }}"
+            mode: "{{ target_mode }}"
+          loop: "{{ vuln_files }}"
+          register: r_fix_files
+          failed_when: false
+          when:
+            - logdir_exists | bool
+            - (vuln_files | length) > 0
+
+        # ---------- status/desc/result (stable, no nested ternary) ----------
+        - name: "U_67_1 | compute | init"
+          ansible.builtin.set_fact:
+            u671_status: 0
+            u671_desc: ""
+            u671_result: ""
+          changed_when: false
+
+        - name: "U_67_1 | compute | logdir missing -> manual"
+          ansible.builtin.set_fact:
+            u671_status: 0
+            u671_desc: "/var/log 디렉터리가 없어 자동조치를 수행하지 않았습니다(수동 확인 필요)"
+          changed_when: false
+          when: not (logdir_exists | bool)
+
+        - name: "U_67_1 | compute | apply done"
+          ansible.builtin.set_fact:
+            u671_status: 2
+            u671_desc: >-
+              {{
+                ((vuln_files | length) > 0)
+                | ternary(
+                    "위반 파일에 대해 root:root 및 0644로 조치했습니다(대상=" ~ (vuln_files | length | string) ~ "개)",
+                    "위반 파일이 없어 조치가 필요 없습니다"
+                  )
+              }}
+          changed_when: false
+          when: logdir_exists | bool
+
+        - name: "U_67_1 | compute | finalize result"
+          ansible.builtin.set_fact:
+            u671_result: "{{ ((u671_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        # ---- stderr(log) : UTF8-safe + section 실제 조치내용 ----
+        - name: "U_67_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_e.stderr_ts | default("")),
+              "flag_id": "U_67_1",
+              "section": "/var/log 내 로그 파일 소유자(root) 및 권한(0644) 설정",
+              "title": "[U_67_1] /var/log 로그 파일 권한/소유자 설정",
+              "cmd": u671_cmd,
+              "result": u671_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        # ---- stdout(json) : UTF8-safe ----
+        - name: "U_67_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_67_1",
+                "status": (u671_status | int),
+                "description": u671_desc,
+                "category": "log",
+                "timestamp": (ts_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_67_1' in (flag_list | default([]))"

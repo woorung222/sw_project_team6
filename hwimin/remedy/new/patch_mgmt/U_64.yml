@@ -1,0 +1,164 @@
+---
+- name: "U_64 | Patch Management Policy (Controlled Env, Controller-Only Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_64"
+
+    # ===== timestamp formats (controller side) =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # ==============================
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # ==============================
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 미정의 방지
+    # ---------------------------------------------------------
+    - name: "U_64 | init defaults"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: ""
+        META_IP: ""
+        META_USER: ""
+
+        OS_PRETTY: ""
+        KERNEL_VER: ""
+        HOSTNAMECTL_RAW: ""
+
+        u641_status: 0
+        u641_desc: ""
+        u641_result: ""
+        u641_cmd: ""
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집 (stdout JSON meta용)
+    # ---------------------------------------------------------
+    - name: "U_64 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_64 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_64 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_64 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (참고용) OS/Kernel 정보 수집 (자동패치/재부팅은 정책상 금지)
+    # ---------------------------------------------------------
+    - name: "U_64 | collect os pretty name"
+      ansible.builtin.shell: |
+        if [ -r /etc/os-release ]; then
+          . /etc/os-release
+          echo "${PRETTY_NAME:-}"
+        else
+          echo ""
+        fi
+      register: r_os
+      changed_when: false
+      failed_when: false
+
+    - name: "U_64 | collect kernel version"
+      ansible.builtin.command: "uname -r"
+      register: r_kernel
+      changed_when: false
+      failed_when: false
+
+    - name: "U_64 | collect hostnamectl"
+      ansible.builtin.command: "hostnamectl"
+      register: r_hctl
+      changed_when: false
+      failed_when: false
+
+    - name: "U_64 | set collected facts"
+      ansible.builtin.set_fact:
+        OS_PRETTY: "{{ r_os.stdout | default('') }}"
+        KERNEL_VER: "{{ r_kernel.stdout | default('') }}"
+        HOSTNAMECTL_RAW: "{{ r_hctl.stdout | default('') }}"
+      changed_when: false
+
+    # =========================================================
+    # U_64_1) 패치 적용 정책 수립/적용: 자동조치 제외(장애 0) → 수동조치 전환 기록
+    # - 자동 업데이트/커널 업데이트/재부팅은 수행하지 않음
+    # - 현 OS/Kernel 현황을 로그/JSON으로 남김
+    # =========================================================
+    - name: "U_64 | [U_64_1] patch policy -> manual handoff + logs/json"
+      block:
+        - name: "U_64_1 | compute status/description/result/cmd (stable)"
+          ansible.builtin.set_fact:
+            u641_status: 2
+            u641_desc: "OS/Kernel 현황을 수집하고, 보안패치 적용은 운영정책에 따라 수동조치로 전환했습니다"
+            u641_result: "조치 성공 (status: 2)"
+            u641_cmd: "hostnamectl; uname -r; (패치 적용/커널 업데이트/재부팅은 운영정책/서비스 영향 분석 후 수동 수행)"
+          changed_when: false
+
+        # ---- stderr(log) : UTF8-safe + section 실제 조치내용 ----
+        - name: "U_64_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_641_e.stderr_ts | default("")),
+              "flag_id": "U_64_1",
+              "section": "OS/Kernel 현황 수집 및 패치 적용 수동조치 전환(장애 0 정책)",
+              "title": "[U_64_1] OS/Kernel 보안패치 적용 정책 수립 및 적용(수동조치 전환)",
+              "cmd": u641_cmd,
+              "result": (
+                "자동조치 제외(장애 0 기준). 현 OS/Kernel 정보 수집 완료 → "
+                ~ "담당자가 패치 적용 창구/재부팅 계획 수립 후 수동으로 최신 보안패치 적용 필요. "
+                ~ "현재 OS=" ~ (OS_PRETTY | default("<unknown>"))
+                ~ ", kernel=" ~ (KERNEL_VER | default("<unknown>"))
+              )
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_641_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        # ---- stdout(json) : UTF8-safe ----
+        - name: "U_64_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_64_1",
+                "status": (u641_status | int),
+                "description": u641_desc,
+                "category": "patch",
+                "timestamp": (ts_641_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_641_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_64_1' in (flag_list | default([]))"

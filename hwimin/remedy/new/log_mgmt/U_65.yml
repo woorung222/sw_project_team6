@@ -1,0 +1,252 @@
+---
+- name: "U_65 | Configure NTP/Chrony Sync (Controlled Env, Controller-Only Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_65"
+
+    # 설정 파일 경로
+    ntp_conf: "/etc/ntp.conf"
+    chrony_conf_candidates:
+      - "/etc/chrony.conf"
+      - "/etc/chrony/chrony.conf"
+
+    # 서비스명(systemd)
+    svc_ntp: "ntp"
+    svc_ntpd: "ntpd"
+    svc_chrony: "chronyd"
+
+    # ===== timestamp formats (controller side) =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    - name: "U_65 | init defaults"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: ""
+        META_IP: ""
+        META_USER: ""
+
+        chrony_conf: ""
+        use_chrony: false
+        use_ntp: false
+
+        ntp_servers_effective: []
+        ready: false
+
+        r_sel_chrony: {}
+        r_chrony_add: {}
+        r_ntp_add: {}
+
+        u651_status: 0
+        u651_desc: ""
+        u651_result: ""
+        u651_cmd: ""
+      changed_when: false
+
+    # ---- normalize input (핵심: vars에서 ntp_servers 재정의 금지) ----
+    - name: "U_65 | normalize input"
+      ansible.builtin.set_fact:
+        ntp_servers_effective: "{{ (ntp_servers | default([])) }}"
+        ready: "{{ ((ntp_servers | default([])) | length > 0) }}"
+      changed_when: false
+
+    # ---- meta ----
+    - name: "U_65 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_65 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_65 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_65 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # ---- select chrony conf ----
+    - name: "U_65 | select chrony conf"
+      ansible.builtin.shell: |
+        for p in {{ chrony_conf_candidates | join(' ') }}; do
+          [ -f "$p" ] && echo "$p" && exit 0
+        done
+        exit 1
+      register: r_sel_chrony
+      changed_when: false
+      failed_when: false
+
+    - name: "U_65 | set chrony_conf"
+      ansible.builtin.set_fact:
+        chrony_conf: "{{ r_sel_chrony.stdout | default('') }}"
+      changed_when: false
+
+    - name: "U_65 | decide daemon"
+      ansible.builtin.set_fact:
+        use_chrony: "{{ (chrony_conf | length > 0) }}"
+        use_ntp: "{{ (chrony_conf | length == 0) and (ntp_conf is file) }}"
+      changed_when: false
+
+    # =========================================================
+    # U_65_1
+    # =========================================================
+    - name: "U_65 | [U_65_1] configure NTP/Chrony servers + restart + logs/json"
+      block:
+        - name: "U_65_1 | chrony | add servers"
+          ansible.builtin.lineinfile:
+            path: "{{ chrony_conf }}"
+            line: "server {{ item }} iburst"
+            insertafter: EOF
+            create: no
+            backup: yes
+          loop: "{{ ntp_servers_effective }}"
+          register: r_chrony_add
+          failed_when: false
+          when:
+            - ready | bool
+            - use_chrony | bool
+
+        - name: "U_65_1 | ntp | add servers"
+          ansible.builtin.lineinfile:
+            path: "{{ ntp_conf }}"
+            line: "server {{ item }}"
+            insertafter: EOF
+            create: no
+            backup: yes
+          loop: "{{ ntp_servers_effective }}"
+          register: r_ntp_add
+          failed_when: false
+          when:
+            - ready | bool
+            - use_ntp | bool
+
+        - name: "U_65_1 | restart chronyd when changed"
+          ansible.builtin.systemd:
+            name: "{{ svc_chrony }}"
+            state: restarted
+          register: r_restart_chrony
+          failed_when: false
+          when:
+            - ready | bool
+            - use_chrony | bool
+            - ((r_chrony_add.changed | default(false)) | bool)
+
+        - name: "U_65_1 | restart ntp/ntpd when changed (fallback)"
+          block:
+            - name: "U_65_1 | restart ntp"
+              ansible.builtin.systemd:
+                name: "{{ svc_ntp }}"
+                state: restarted
+              register: r_restart_ntp
+              failed_when: false
+
+            - name: "U_65_1 | restart ntpd (fallback)"
+              ansible.builtin.systemd:
+                name: "{{ svc_ntpd }}"
+                state: restarted
+              register: r_restart_ntpd
+              failed_when: false
+          when:
+            - ready | bool
+            - use_ntp | bool
+            - ((r_ntp_add.changed | default(false)) | bool)
+
+        - name: "U_65_1 | compute status/description/result/cmd (stable)"
+          ansible.builtin.set_fact:
+            u651_status: >-
+              {{
+                (ready | bool)
+                | ternary(
+                    ((use_chrony | bool) or (use_ntp | bool)) | ternary(2, 0),
+                    0
+                  )
+              }}
+            u651_desc: >-
+              {{
+                (ready | bool)
+                | ternary(
+                    ((use_chrony | bool) or (use_ntp | bool))
+                    | ternary(
+                        "NTP/Chrony 서버 설정을 반영했습니다(변경 시 데몬 재시작 포함)",
+                        "chrony/ntp 설정 파일이 없어 수동조치로 전환했습니다"
+                      ),
+                    "ntp_servers 미제공으로 수동조치로 전환했습니다"
+                  )
+              }}
+            u651_result: "{{ ((u651_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+            u651_cmd: >-
+              {{
+                (ready | bool)
+                | ternary(
+                    (
+                      (use_chrony | bool)
+                      | ternary(
+                          ("append 'server <ntp> iburst' to " ~ (chrony_conf | default('<chrony_conf>')) ~ "; (if changed) systemctl restart " ~ svc_chrony),
+                          ("append 'server <ntp>' to " ~ ntp_conf ~ "; (if changed) systemctl restart " ~ svc_ntp ~ "|" ~ svc_ntpd)
+                        )
+                    ),
+                    "입력값(ntp_servers) 미제공으로 자동조치 불가 → 수동조치 필요"
+                  )
+              }}
+          changed_when: false
+
+        # ---- stderr(log) ----
+        - name: "U_65_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts_651_e.stderr_ts | default("")),
+              "flag_id": "U_65_1",
+              "section": "NTP/Chrony 동기화 서버(server) 설정 추가 및 데몬 재시작(변경 시)",
+              "title": "[U_65_1] NTP/Chrony 동기화 서버 설정 및 재시작(변경 시)",
+              "cmd": u651_cmd,
+              "result": u651_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_651_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        # ---- stdout(json) ----
+        - name: "U_65_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_65_1",
+                "status": (u651_status | int),
+                "description": u651_desc,
+                "category": "log",
+                "timestamp": (ts_651_o.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_651_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_65_1' in (flag_list | default([]))"

@@ -1,0 +1,202 @@
+- name: "U_55 | Remediate FTP Default Account Shell Restriction (Controlled Env, Logs+JSON, Host-Split, UTF8-safe)"
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    FLAG_ID: "U_55"
+
+    # 조치 대상/기준
+    ftp_user: "ftp"
+    allowed_shells:
+      - "/bin/false"
+      - "/sbin/nologin"
+      - "/usr/sbin/nologin"
+
+    # 조치 값(통일): ftp 계정 쉘을 /bin/false 로 고정
+    remediate_shell: "/bin/false"
+
+    # ===== timestamp formats =====
+    TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
+    TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
+
+    # ==============================
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # ==============================
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+
+  tasks:
+    # ---------------------------------------------------------
+    # (공통) 변수 기본값: 스킵/실패로 미정의 터짐 방지
+    # ---------------------------------------------------------
+    - name: "U_55 | init defaults"
+      ansible.builtin.set_fact:
+        r_getent: {}
+        current_shell: ""
+        r_usermod: {}
+        u551_status: 0
+        u551_desc: ""
+        u551_result: ""
+        u551_cmd: ""
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) meta 수집 (stdout JSON meta용)
+    # ---------------------------------------------------------
+    - name: "U_55 | meta | hostname"
+      ansible.builtin.command: "hostname"
+      register: m_host
+      changed_when: false
+
+    - name: "U_55 | meta | ip"
+      ansible.builtin.shell: "hostname -I | awk '{print $1}'"
+      register: m_ip
+      changed_when: false
+
+    - name: "U_55 | meta | user"
+      ansible.builtin.command: "whoami"
+      register: m_user
+      changed_when: false
+
+    - name: "U_55 | meta | set_fact"
+      ansible.builtin.set_fact:
+        META_HOSTNAME: "{{ m_host.stdout | default('') }}"
+        META_IP: "{{ m_ip.stdout | default('') }}"
+        META_USER: "{{ m_user.stdout | default('') }}"
+      changed_when: false
+
+    # =========================================================
+    # U_55_1) ftp 계정 로그인 쉘 제한
+    # =========================================================
+    - name: "U_55 | [U_55_1] ftp 계정 쉘 제한(user login deny) + 로그/JSON"
+      block:
+        - name: "U_55_1 | getent passwd ftp"
+          ansible.builtin.command: "getent passwd {{ ftp_user }}"
+          register: r_getent
+          changed_when: false
+          failed_when: false
+
+        - name: "U_55_1 | parse current shell"
+          ansible.builtin.set_fact:
+            current_shell: >-
+              {{
+                ((r_getent.rc | default(1) | int) == 0)
+                | ternary((r_getent.stdout.split(':') | last | default('')), '')
+              }}
+          changed_when: false
+
+        - name: "U_55_1 | remediate: usermod -s /bin/false ftp (only when needed)"
+          ansible.builtin.command: "usermod -s {{ remediate_shell }} {{ ftp_user }}"
+          register: r_usermod
+          changed_when: true
+          failed_when: false
+          when:
+            - (r_getent.rc | default(1) | int) == 0
+            - current_shell | length > 0
+            - current_shell not in allowed_shells
+
+        # ---- status/description/result/cmd 계산 (문법 안정형: when 분기) ----
+        - name: "U_55_1 | compute status/description/result (stable)"
+          block:
+            - name: "U_55_1 | compute | init"
+              ansible.builtin.set_fact:
+                u551_cmd: "getent passwd {{ ftp_user }}; (if needed) usermod -s {{ remediate_shell }} {{ ftp_user }}"
+                u551_status: 0
+                u551_desc: ""
+              changed_when: false
+
+            - name: "U_55_1 | compute | ftp account missing"
+              ansible.builtin.set_fact:
+                u551_status: 0
+                u551_desc: "ftp 계정이 존재하지 않아 조치할 수 없습니다"
+              changed_when: false
+              when:
+                - (r_getent.rc | default(1) | int) != 0
+
+            - name: "U_55_1 | compute | already restricted shell"
+              ansible.builtin.set_fact:
+                u551_status: 2
+                u551_desc: "ftp 계정 쉘이 이미 로그인 불가 쉘로 설정되어 있습니다({{ current_shell | default('') }})"
+              changed_when: false
+              when:
+                - (r_getent.rc | default(1) | int) == 0
+                - current_shell in allowed_shells
+
+            - name: "U_55_1 | compute | usermod success"
+              ansible.builtin.set_fact:
+                u551_status: 2
+                u551_desc: "ftp 계정 쉘을 {{ remediate_shell }} 로 변경했습니다"
+              changed_when: false
+              when:
+                - (r_getent.rc | default(1) | int) == 0
+                - current_shell | length > 0
+                - current_shell not in allowed_shells
+                - (r_usermod.rc | default(1) | int) == 0
+
+            - name: "U_55_1 | compute | usermod failed"
+              ansible.builtin.set_fact:
+                u551_status: 0
+                u551_desc: "usermod 실행 실패로 ftp 계정 쉘 변경에 실패했습니다"
+              changed_when: false
+              when:
+                - (r_getent.rc | default(1) | int) == 0
+                - current_shell | length > 0
+                - current_shell not in allowed_shells
+                - (r_usermod.rc | default(1) | int) != 0
+
+            - name: "U_55_1 | compute | finalize result"
+              ansible.builtin.set_fact:
+                u551_result: "{{ ((u551_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+              changed_when: false
+
+        # ---- stderr(JSON) : 조치 내용 ----
+        - name: "U_55_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe, host-split)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: >
+            printf '%s\n' '{{ {
+              "ts": (ts_551_e.stderr_ts | default("")),
+              "flag_id": "U_55_1",
+              "section": "ftp 계정 로그인 쉘 제한(/bin/false 또는 nologin 계열 적용)",
+              "title": "[U_55_1] ftp 계정 로그인 쉘 제한(/bin/false 적용)",
+              "cmd": u551_cmd,
+              "result": u551_result
+            } | to_json }}'
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_551_e:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
+        # ---- stdout(JSON) : 조치 결과 ----
+        - name: "U_55_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe, host-split)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: >
+            printf '%s\n' '{{ {
+              "meta": {
+                "hostname": META_HOSTNAME,
+                "ip": META_IP,
+                "user": META_USER
+              },
+              "result": {
+                "flag_id": "U_55_1",
+                "status": (u551_status | int),
+                "description": u551_desc,
+                "category": "service",
+                "timestamp": (ts_551_o.stdout_ts | default(""))
+              }
+            } | to_json }}'
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts_551_o:
+              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+          changed_when: false
+      when:
+        - "'U_55_1' in (flag_list | default([]))"
