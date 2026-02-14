@@ -1,0 +1,239 @@
+---
+- name: "U-44 tftp, talk, ntalk 서비스 비활성화"
+  hosts: all
+  become: yes
+   
+
+  vars:
+    file: "service"
+    target_services:
+      - tftp
+      - talk
+      - ntalk
+    flag_list: []
+    ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+    STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+ 
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+ 
+    # 파일명 규칙: ubuntu24-remediate_U-54.log / .json
+    my_log_file: "{{ log_dir }}/ubuntu24-remediate"
+    my_json_file: "{{ json_dir }}/ubuntu24-remediate"
+  tasks: 
+    # 0. 사전 정보 수집
+    - name: "0-1. 서비스 정보 수집"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    - name: "0-2. /etc/inetd.conf 파일 존재 확인"
+      ansible.builtin.stat:
+        path: /etc/inetd.conf
+      register: inetd_file
+
+    # 1. [inetd] 환경 조치
+    - name: "1-1. /etc/inetd.conf 파일 수정 (주석 처리)"
+      ansible.builtin.replace:
+        path: /etc/inetd.conf
+        regexp: '^(\s*)(tftp|talk|ntalk)(\s+.*)$'
+        replace: '#\1\2\3'
+      when: 
+      - inetd_file.stat.exists
+      - "'U_44_1' in flag_list"
+      register: inetd_modify
+
+    - name: "1-2. inetd 서비스 재시작"
+      ansible.builtin.systemd:
+        name: inetd
+        state: restarted
+      when: 
+        - inetd_modify.changed
+        - "'inetd.service' in services_state.ansible_facts.services"
+        - "'U_44_1' in flag_list"
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}_U_44_1.log"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_44_1",
+          "section": "[조치 내용]",
+          "title": "[U_44_1] (/etc/inetd.conf 파일 수정)",
+          "cmd": " #tftp dgram udp nobody /usr/sbin/tftpd tftpd -n, #talk stream tcp wait root /usr/sbin/talkd talkd, #ntalk dgram udp wait root /usr/sbin/talkd talkd  ",
+          "result": "조치 성공 (/etc/inetd.conf 파일 수정)"
+         } |  to_json(ensure_ascii=False)
+        }}
+      when: "'U_44_1' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}_U_44_1.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_44_1",
+              "status": 2, 
+              "description": "/etc/inetd.conf 파일 수정 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } |  to_json(ensure_ascii=False)
+        }}
+      changed_when: false
+      when: "'U_44_1' in flag_list"
+
+    # 2. [xinetd] 환경 조치
+    - name: "2-1. xinetd 파일 존재 확인"
+      ansible.builtin.stat:
+        path: "/etc/xinetd.d/{{ item }}"
+      loop: "{{ target_services }}"
+      register: xinetd_stats
+      when: "'U_44_2' in flag_list"
+
+    - name: "2-2. [xinetd] 설정값 변경: disable = yes"
+      ansible.builtin.lineinfile:
+        path: "/etc/xinetd.d/{{ item.item }}"
+        regexp: '^\s*disable\s*='
+        line: "\tdisable = yes"
+        state: present
+      loop: "{{ xinetd_stats.results }}"
+      when:
+       - item.stat is defined      # <--- 1. stat 속성이 존재하는지 먼저 확인
+       - item.stat.exists 
+       - "'U_44_2' in flag_list"
+      register: xinetd_update
+
+    - name: "2-3. xinetd 서비스 재시작"
+      ansible.builtin.systemd:
+        name: xinetd
+        state: restarted
+      # 루프 결과 중 하나라도 변경(changed)되었다면 실행
+      when: 
+        - xinetd_update.results | selectattr('changed', 'defined') | selectattr('changed', 'equalto', true) | list | length > 0
+        - "'xinetd.service' in services_state.ansible_facts.services"
+        - "'U_44_2' in flag_list"
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}_U_44_2.log"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_44_2",
+          "section": "[조치 내용]",
+          "title": "[U_44_2] (설정값 변경: disable = yes)",
+          "cmd": " vi <tftp, talk, ntalk> -> disable = yes",
+          "result": "조치 성공 (설정값 변경: disable = yes)"
+         } |  to_json(ensure_ascii=False)
+        }}
+      when: "'U_44_2' in flag_list"
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}_U_44_2.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_44_2",
+              "status": 2, 
+              "description": " xinetd 설정값 변경 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } |  to_json(ensure_ascii=False)
+        }}
+      changed_when: false
+      when: "'U_44_2' in flag_list"
+
+    # 3. [systemd] 환경 조치
+    - name: "3. [systemd] 서비스 중지 및 비활성화"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+        masked: yes
+      loop: "{{ target_services }}"
+      # 서비스가 실제 시스템에 존재할 때만 실행
+      when:
+       - "item ~ '.service' in services_state.ansible_facts.services or item in services_state.ansible_facts.services" 
+       - "'U_44_3' in flag_list"
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}_U_44_3.log"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_44_3",
+          "section": "[조치 내용]",
+          "title": "[U_44_3] ([systemd] 서비스 중지 및 비활성화)",
+          "cmd": " sytemctl [stop/disable] <서비스명>",
+          "result": "조치 성공 ([systemd] 서비스 중지 및 비활성화)"
+         } |  to_json(ensure_ascii=False)
+        }}
+      when: "'U_44_3' in flag_list"
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}_U_44_3.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_44_3",
+              "status": 2, 
+              "description": "[systemd] 서비스 중지 및 비활성화 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } |  to_json(ensure_ascii=False)
+        }}
+      changed_when: false
+      when: "'U_44_3' in flag_list"
+         
+
+      
