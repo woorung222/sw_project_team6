@@ -1,3 +1,4 @@
+---
 - name: "U_59 | Enforce SNMPv3 (Controlled Env, Logs+JSON to /tmp, Stream-Split, UTF8-safe, Host-Split)"
   hosts: all
   become: yes
@@ -12,27 +13,29 @@
 
     # ===== SNMPv3 입력 변수(값이 있어야만 자동 반영) =====
     # 값 미제공 시: 자동조치 불가 → 수동조치로 넘기고 계속 진행(팀 조건)
-    snmpv3_user: "{{ snmpv3_user | default('') }}"
-    snmpv3_auth_proto: "{{ snmpv3_auth_proto | default('') }}"   # 예: SHA
-    snmpv3_auth_pass: "{{ snmpv3_auth_pass | default('') }}"     # 예: myauthpass
-    snmpv3_priv_proto: "{{ snmpv3_priv_proto | default('') }}"   # 예: AES
-    snmpv3_priv_pass: "{{ snmpv3_priv_pass | default('') }}"     # 예: myprivpass
-
-    # 권한: ro/rw (기본 ro)
-    snmpv3_access: "{{ snmpv3_access | default('ro') }}"         # ro 또는 rw
+    snmpv3_user_in: "{{ snmpv3_user | default('') }}"
+    snmpv3_auth_proto_in: "{{ snmpv3_auth_proto | default('') }}"   # 예: SHA
+    snmpv3_auth_pass_in: "{{ snmpv3_auth_pass | default('') }}"     # 예: myauthpass
+    snmpv3_priv_proto_in: "{{ snmpv3_priv_proto | default('') }}"   # 예: AES
+    snmpv3_priv_pass_in: "{{ snmpv3_priv_pass | default('') }}"     # 예: myprivpass
+    snmpv3_access_in: "{{ snmpv3_access | default('ro') }}"         # ro 또는 rw
 
     # ===== timestamp formats =====
     TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
     TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
 
     # ==============================
-    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙
     # ==============================
     log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
 
-    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
-    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+    # ✅ 핵심: inventory_hostname에서 '-scan' 제거한 값을 파일명으로 고정
+    FILE_HOST: "{{ inventory_hostname | regex_replace('(-scan)$', '') }}"
+
+    # ✅ 무조건 FILE_HOST 사용 (set_fact로 덮어쓰기 필요 없음)
+    my_log_file: "{{ log_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.json"
 
   tasks:
     # ---------------------------------------------------------
@@ -216,8 +219,6 @@
 
     # =========================================================
     # U_59_2) SNMP 서비스를 사용하는 경우: SNMPv3 적용
-    # - 값 미제공 시: status=0 + 수동조치 안내(팀 조건) + 계속 진행
-    # - 값 제공 시: v3 사용자 생성 시도 + snmpd.conf 반영 + (변경 시) 재시작
     # =========================================================
     - name: "U_59 | [U_59_2] enforce SNMPv3 user + config + restart (UTF8-safe logs/json)"
       block:
@@ -225,23 +226,23 @@
           ansible.builtin.set_fact:
             v3_ready: >-
               {{
-                (snmpv3_user | length > 0)
-                and (snmpv3_auth_proto | length > 0)
-                and (snmpv3_auth_pass | length > 0)
-                and (snmpv3_priv_proto | length > 0)
-                and (snmpv3_priv_pass | length > 0)
-                and ((snmpv3_access | lower) in ["ro","rw"])
+                (snmpv3_user_in | length > 0)
+                and (snmpv3_auth_proto_in | length > 0)
+                and (snmpv3_auth_pass_in | length > 0)
+                and (snmpv3_priv_proto_in | length > 0)
+                and (snmpv3_priv_pass_in | length > 0)
+                and ((snmpv3_access_in | lower) in ["ro","rw"])
               }}
             v3_cmd: >-
               net-snmp-create-v3-user
-              -{{ (snmpv3_access | lower) }}
-              -a {{ snmpv3_auth_proto }} -A '{{ snmpv3_auth_pass }}'
-              -x {{ snmpv3_priv_proto }} -X '{{ snmpv3_priv_pass }}'
-              {{ snmpv3_user }}
+              -{{ (snmpv3_access_in | lower) }}
+              -a {{ snmpv3_auth_proto_in }} -A '{{ snmpv3_auth_pass_in }}'
+              -x {{ snmpv3_priv_proto_in }} -X '{{ snmpv3_priv_pass_in }}'
+              {{ snmpv3_user_in }}
             v3_access_line: >-
               {{
-                ((snmpv3_access | lower) == "rw")
-                | ternary("rwuser " ~ snmpv3_user, "rouser " ~ snmpv3_user)
+                ((snmpv3_access_in | lower) == "rw")
+                | ternary("rwuser " ~ snmpv3_user_in, "rouser " ~ snmpv3_user_in)
               }}
           changed_when: false
 
@@ -255,8 +256,8 @@
         - name: "U_59_2 | ensure createUser in snmpd.conf (only when inputs provided)"
           ansible.builtin.lineinfile:
             path: "{{ snmpd_conf }}"
-            regexp: "^[[:space:]]*createUser[[:space:]]+{{ snmpv3_user }}\\b"
-            line: "createUser {{ snmpv3_user }} {{ snmpv3_auth_proto }} {{ snmpv3_auth_pass }} {{ snmpv3_priv_proto }} {{ snmpv3_priv_pass }}"
+            regexp: "^[[:space:]]*createUser[[:space:]]+{{ snmpv3_user_in }}\\b"
+            line: "createUser {{ snmpv3_user_in }} {{ snmpv3_auth_proto_in }} {{ snmpv3_auth_pass_in }} {{ snmpv3_priv_proto_in }} {{ snmpv3_priv_pass_in }}"
             insertafter: EOF
             create: no
             backup: yes
@@ -267,7 +268,7 @@
         - name: "U_59_2 | ensure rouser/rwuser in snmpd.conf (only when inputs provided)"
           ansible.builtin.lineinfile:
             path: "{{ snmpd_conf }}"
-            regexp: "^[[:space:]]*(rouser|rwuser)[[:space:]]+{{ snmpv3_user }}\\b"
+            regexp: "^[[:space:]]*(rouser|rwuser)[[:space:]]+{{ snmpv3_user_in }}\\b"
             line: "{{ v3_access_line }}"
             insertafter: EOF
             create: no

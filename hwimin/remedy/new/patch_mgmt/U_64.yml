@@ -12,13 +12,10 @@
     TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
 
     # ==============================
-    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # [팀 조건] 로그/JSON 경로 (호스트별 분리)
     # ==============================
     log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
-
-    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
-    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
 
   tasks:
     # ---------------------------------------------------------
@@ -38,10 +35,13 @@
         u641_desc: ""
         u641_result: ""
         u641_cmd: ""
+
+        # 파일명용(기본은 inventory_hostname)
+        FILE_HOST: "{{ inventory_hostname }}"
       changed_when: false
 
     # ---------------------------------------------------------
-    # (공통) meta 수집 (stdout JSON meta용)
+    # (공통) meta 수집 (stdout JSON meta용 + 파일명 호스트 결정)
     # ---------------------------------------------------------
     - name: "U_64 | meta | hostname"
       ansible.builtin.command: "hostname"
@@ -63,6 +63,22 @@
         META_HOSTNAME: "{{ m_host.stdout | default('') }}"
         META_IP: "{{ m_ip.stdout | default('') }}"
         META_USER: "{{ m_user.stdout | default('') }}"
+        FILE_HOST: >-
+          {{
+            (m_host.stdout | default('') | trim)
+            | regex_replace('-scan$', '')
+            | regex_replace('-controller$', '')
+            | default(inventory_hostname)
+          }}
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # (공통) 파일 경로 확정 (meta 수집 후에 만들어야 함)
+    # ---------------------------------------------------------
+    - name: "U_64 | set log/json file path (host-shortened)"
+      ansible.builtin.set_fact:
+        my_log_file: "{{ log_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.log"
+        my_json_file: "{{ json_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.json"
       changed_when: false
 
     # ---------------------------------------------------------
@@ -101,8 +117,6 @@
 
     # =========================================================
     # U_64_1) 패치 적용 정책 수립/적용: 자동조치 제외(장애 0) → 수동조치 전환 기록
-    # - 자동 업데이트/커널 업데이트/재부팅은 수행하지 않음
-    # - 현 OS/Kernel 현황을 로그/JSON으로 남김
     # =========================================================
     - name: "U_64 | [U_64_1] patch policy -> manual handoff + logs/json"
       block:
