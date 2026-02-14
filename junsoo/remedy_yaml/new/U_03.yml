@@ -20,11 +20,13 @@
   tasks:
     # =========================================================
     # [RedHat] 1. U_03_1 : pam_tally / pam_tally2 설정
+    # (주의: RHEL 8/9 이상은 pam_tally2 사용 불가. RHEL 7 이하만 해당)
     # =========================================================
     - name: "[U_03_1] RedHat pam_tally2 Remediation"
       when: 
         - "'U_03_1' in flag_list"
         - ansible_os_family == 'RedHat'
+        - ansible_distribution_major_version|int < 8  # 버전 8 미만에서만 실행되도록 보호 조치
       block:
         - name: "Configure pam_tally2 in system-auth"
           lineinfile:
@@ -33,13 +35,92 @@
             line: "auth required pam_tally2.so deny={{ deny_count }} unlock_time={{ unlock_time }} no_magic_root"
           register: r_u03_1
         
-        - name: "Log Success U_03_1"
-          include_tasks: log_helper.yml # 아래 로그 기록 로직과 동일 (지면상 축약 가능)
-          vars: { f_id: "U_03_1", status: 2, desc: "RedHat pam_tally2 설정 완료" }
+        # -----------------------------------------------------
+        # [로그 기록] 성공 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_1 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_1",
+                  "status": 2,
+                  "description": "RedHat pam_tally2 설정 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_1 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_1",
+                "section": "[조치 결과]",
+                "title": "[U_03_1] 계정 잠금 임계값 설정(pam_tally2)",
+                "cmd": "system-auth 파일 수정 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
       rescue:
-        - name: "Log Failure U_03_1"
-          include_tasks: log_helper.yml
-          vars: { f_id: "U_03_1", status: 0, desc: "RedHat pam_tally2 설정 실패" }
+        # -----------------------------------------------------
+        # [로그 기록] 실패 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_1 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_1",
+                  "status": 0,
+                  "description": "조치 실패: RedHat pam_tally2 설정 실패",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_1 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_1",
+                "section": "[조치 결과]",
+                "title": "[U_03_1] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
+              }
 
     # =========================================================
     # [RedHat] 2. U_03_2 : pam_faillock (Manual config)
@@ -56,11 +137,92 @@
             replace: "pam_faillock.so preauth silent audit deny={{ deny_count }} unlock_time={{ unlock_time }}"
           register: r_u03_2
         
-        - name: "Log Success U_03_2"
-          shell: "echo success" # 실제 구현시 상단 로그 양식 적용
+        # -----------------------------------------------------
+        # [로그 기록] 성공 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_2 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_2",
+                  "status": 2,
+                  "description": "RedHat pam_faillock(Manual) 설정 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_2 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_2",
+                "section": "[조치 결과]",
+                "title": "[U_03_2] 계정 잠금 임계값 설정(pam_faillock)",
+                "cmd": "system-auth 파일 수정 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
       rescue:
-        - name: "Log Failure U_03_2"
-          shell: "echo fail"
+        # -----------------------------------------------------
+        # [로그 기록] 실패 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_2 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_2",
+                  "status": 0,
+                  "description": "조치 실패: RedHat pam_faillock 설정 실패",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_2 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_2",
+                "section": "[조치 결과]",
+                "title": "[U_03_2] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
+              }
 
     # =========================================================
     # [RedHat] 3. U_03_3 : authselect (권장 방식)
@@ -83,16 +245,92 @@
             - { key: 'unlock_time', value: "{{ unlock_time }}" }
             - { key: 'silent', value: '' }
 
-        - name: "Log Success U_03_3 (JSON)"
+        # -----------------------------------------------------
+        # [로그 기록] 성공 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_3 Success (JSON)"
           delegate_to: localhost
           become: false
           lineinfile:
             path: "{{ my_json_file }}"
             create: yes
-            line: '{"result": {"flag_id": "U_03_3", "status": 2, "description": "authselect faillock 활성화 및 정책 설정 완료"}}'
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_3",
+                  "status": 2,
+                  "description": "authselect faillock 활성화 및 정책 설정 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_3 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_3",
+                "section": "[조치 결과]",
+                "title": "[U_03_3] 계정 잠금 임계값 설정(authselect)",
+                "cmd": "authselect 및 faillock.conf 설정 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
       rescue:
-        - name: "Log Failure U_03_3"
-          shell: "echo fail"
+        # -----------------------------------------------------
+        # [로그 기록] 실패 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_3 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_3",
+                  "status": 0,
+                  "description": "조치 실패: authselect 설정 중 에러",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_3 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_3",
+                "section": "[조치 결과]",
+                "title": "[U_03_3] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
+              }
 
     # =========================================================
     # [Debian] 4. U_03_4 : pam_tally / pam_tally2 설정
@@ -107,11 +345,92 @@
             path: /etc/pam.d/common-auth
             line: "auth required pam_tally2.so deny={{ deny_count }} unlock_time={{ unlock_time }}"
         
-        - name: "Log Success U_03_4"
-          shell: "echo success"
+        # -----------------------------------------------------
+        # [로그 기록] 성공 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_4 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_4",
+                  "status": 2,
+                  "description": "Debian pam_tally2 설정 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_4 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_4",
+                "section": "[조치 결과]",
+                "title": "[U_03_4] 계정 잠금 임계값 설정(pam_tally2)",
+                "cmd": "common-auth 파일 수정 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
       rescue:
-        - name: "Log Failure U_03_4"
-          shell: "echo fail"
+        # -----------------------------------------------------
+        # [로그 기록] 실패 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_4 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_4",
+                  "status": 0,
+                  "description": "조치 실패: Debian pam_tally2 설정 실패",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_4 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_4",
+                "section": "[조치 결과]",
+                "title": "[U_03_4] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
+              }
 
     # =========================================================
     # [Debian] 5. U_03_5 : pam_faillock (Ubuntu 표준)
@@ -127,13 +446,89 @@
             path: /etc/pam.d/common-auth
             line: "auth required pam_faillock.so preauth silent audit deny={{ deny_count }} unlock_time={{ unlock_time }}"
         
-        - name: "Log Success U_03_5"
+        # -----------------------------------------------------
+        # [로그 기록] 성공 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_5 Success (JSON)"
           delegate_to: localhost
           become: false
           lineinfile:
             path: "{{ my_json_file }}"
             create: yes
-            line: '{"result": {"flag_id": "U_03_5", "status": 2, "description": "Ubuntu pam_faillock 설정 완료"}}'
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_5",
+                  "status": 2,
+                  "description": "Ubuntu pam_faillock 설정 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+        
+        - name: "Log U_03_5 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_5",
+                "section": "[조치 결과]",
+                "title": "[U_03_5] 계정 잠금 임계값 설정(pam_faillock)",
+                "cmd": "common-auth 파일 수정 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
       rescue:
-        - name: "Log Failure U_03_5"
-          shell: "echo fail"
+        # -----------------------------------------------------
+        # [로그 기록] 실패 (JSON & Log File)
+        # -----------------------------------------------------
+        - name: "Log U_03_5 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_03_5",
+                  "status": 0,
+                  "description": "조치 실패: Ubuntu pam_faillock 설정 실패",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_03_5 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_03_5",
+                "section": "[조치 결과]",
+                "title": "[U_03_5] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
+              }
