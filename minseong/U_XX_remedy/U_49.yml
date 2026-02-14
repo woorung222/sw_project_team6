@@ -1,0 +1,155 @@
+---
+- name: "U-49 DNS 보안 버전 패치 (BIND)"
+  hosts: all
+  become: yes
+   
+
+  vars:
+   file: "system"
+   flag_list: []
+   ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+   ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+   STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+
+   log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+   json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: ubuntu24-remediate_U-54.log / .json
+   my_log_file: "{{ log_dir }}/ubuntu24-remediate"
+   my_json_file: "{{ json_dir }}/ubuntu24-remediate"
+  tasks: 
+
+    # 1. DNS 서비스(named) 활성화 여부 확인 
+    - name: "1. BIND 서비스(named) 상태 확인"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    # 2. DNS 서비스를 사용하지 않는 경우 (조치 방법 기준)
+    - name: "2. DNS 미사용 시 서비스 중지 및 비활성화 "
+      ansible.builtin.systemd:
+        name: named
+        state: stopped
+        enabled: no
+        masked: yes
+      when: 
+        - "'named.service' in services_state.ansible_facts.services"
+        # 실제 DNS 서버로 운영 중이 아닌 경우에만 중지
+        - "services_state.ansible_facts.services['named.service'].state != 'running'"
+        - "'U_49_1' in flag_list"
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}/U_49_1.log"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_49_1",
+          "section": "[조치 내용]",
+          "title": "[U_49_1] (DNS 미사용 시 서비스 중지 및 비활성화)",
+          "cmd": " systemctl stop named ",
+          "result": "조치 성공 (DNS 미사용 시 서비스 중지 및 비활성화)"
+         } |  to_json(ensure_ascii=False)
+        }}
+      when: "'U_49_1' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}/U_49_1.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_49_1",
+              "status": 2, 
+              "description": "DNS 미사용 시 서비스 중지 및 비활성화 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } |  to_json(ensure_ascii=False)
+        }}
+      changed_when: false
+      when: "'U_49_1' in flag_list"
+
+    # 3. DNS 서비스 사용 시 버전 확인 및 패치 (Step 3, 4)
+    - name: " BIND 서비스 사용 시 최신 패치 적용"
+      block:
+        - name: "3-1. 현재 BIND 버전 확인 (Step 3)"
+          ansible.builtin.shell: "named -v"
+          register: bind_version
+          changed_when: false
+          when:
+           - "'U_49_2' in flag_list"
+
+        - name: "3-2. BIND 최신 버전으로 업데이트 (Step 4)"
+          # 가이드의 '주기적으로 패치를 관리하는 경우 양호' 기준 충족
+          ansible.builtin.package:
+            name: bind
+            state: latest
+          register: patch_result
+          when:
+           - "'U_49_2' in flag_list"
+      when: 
+        - "'named.service' in services_state.ansible_facts.services"
+        - "services_state.ansible_facts.services['named.service'].state == 'running'"
+        - "'U_49_2' in flag_list"
+    
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}/U_49_2.log"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_49_2",
+          "section": "[조치 내용]",
+          "title": "[U_49_2] (BIND 서비스 사용 시 최신 패치 적용)",
+          "cmd": " systemctl stop named ",
+          "result": "조치 성공 (BIND 서비스 사용 시 최신 패치 적용)"
+         } |  to_json(ensure_ascii=False)
+        }}
+      when: "'U_49_2' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}/U_49_2.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_49_2",
+              "status": 2, 
+              "description": "BIND 서비스 사용 시 최신 패치 적용",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } |  to_json(ensure_ascii=False)
+        }}
+      changed_when: false
+      when: "'U_49_2' in flag_list"

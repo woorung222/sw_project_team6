@@ -1,0 +1,93 @@
+---
+- name: 주요정보통신기반시설 보안 조치 - U-14 (PATH 환경변수 설정)
+  hosts: all
+  become: yes
+  vars:
+    file: "file"
+    target_files:
+      - /etc/profile
+      - /etc/bash.bashrc
+      - /root/.profile
+      - /root/.bashrc
+      - /root/.bash_profile
+    flag_list: []
+    ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+    STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+    
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: ubuntu24-remediate_U-54.log / .json
+    my_log_file: "{{ log_dir }}/ubuntu24-remediate"
+    my_json_file: "{{ json_dir }}/ubuntu24-remediate"
+
+  tasks:
+    # 파일들의 존재 여부를 먼저 확인합니다.
+    - name: "PATH 설정 파일 존재 여부 확인"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ target_files }}"
+      register: file_stats
+      when: "'U_14_1' in flag_list"
+
+    # 파일이 존재하는 경우(exists)에만 수정을 시도합니다.
+    - name: "U-14: PATH 환경변수 내 '.' 포함 여부 확인 및 수정"
+      ansible.builtin.replace:
+        path: "{{ item.item }}"
+        # PATH= 뒤에 오는 점(.) 또는 중간의 :.: 패턴을 찾아 변경
+        regexp: '(?<=PATH=)(\.:|:.:)'
+        replace: ':'
+      # stat 결과에서 exists가 true인 경우에만 실행
+      when: 
+      - item.stat.exists
+      - "'U_14_1' in flag_list"
+      register: patch_result
+      loop: "{{ file_stats.results }}"
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+        path: "{{ my_log_file }}/U_14_1.log"     # [필수] vars에 선언한 로그 파일 경로
+        create: yes                   # [옵션] 파일 없으면 생성
+        mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+        line: >-
+         {{
+          {
+           "ts": ts_stderr,
+           "flag_id": "U_14_1",
+           "section": "[조치 내용]: ",
+           "title": "[U_14_1] (PATH= 뒤에 오는 점(.) 또는 중간의 :.: 패턴을 찾아 변경)",
+           "cmd": "sed -i 's/\(PATH=\)\.:/\1:/g' 's/:.:/:/g' $file ",
+           "result": "조치 성공 (PATH= 뒤에 오는 점(.) 또는 중간의 :.: 패턴을 찾아 변경)"
+          } |  to_json(ensure_ascii=False)
+         }}
+      when: "'U_14_1' in flag_list"
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}/U_14_1.json"
+            # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+          {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_14_1",
+              "status": 2, 
+              "description": "PATH 경로의 .을 제거했음",
+              "category": "file",
+              "timestamp": ts_stdout
+             }
+          } |  to_json(ensure_ascii=False)
+        }}
+      when: "'U_14_1' in flag_list"
