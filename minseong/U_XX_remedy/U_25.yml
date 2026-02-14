@@ -1,0 +1,111 @@
+---
+- name: "U-25 World Writable 파일 점검 및 조치"
+  hosts: all
+  become: yes
+   
+
+  vars:
+   file: "file"
+   flag_list: []
+   ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+   ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+   STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+
+   log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+   json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: {{ansible_hostname| replace('-scan','')}}-remediate_U-54.log / .json
+   my_log_file: "{{ log_dir }}/{{ansible_hostname| replace('-scan','')}}-remediate"
+   my_json_file: "{{ json_dir }}/{{ansible_hostname| replace('-scan','')}}-remediate"
+  tasks: 
+    - name: "시스템 내 World Writable 파일 검색 "
+      # 가이드의 find 명령어를 사용하여 일반 사용자 쓰기 권한(-perm -2)이 있는 파일 탐색
+      ansible.builtin.shell: |
+        find / -type f -perm -2 -xdev -ls 2>/dev/null
+      register: world_writable_files
+      changed_when: false
+
+    - name: "일반 사용자 쓰기 권한 제거"
+      # 가이드 조치 사례: chmod o-w <파일 이름>
+      # 검색된 파일이 있을 경우에만 실행됩니다.
+      ansible.builtin.file:
+        path: "{{ item.split()[-1] }}" # ls -ls 결과에서 파일 경로만 추출
+        mode: "o-w"
+      loop: "{{ world_writable_files.stdout_lines }}"
+      when: world_writable_files.stdout_lines | length > 0
+      register: remediation_output
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}_U_25.log"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_25_1",
+          "section": "[조치 내용]",
+          "title": "[U_25_1] (일반 사용자 쓰기 권한 제거)",
+          "cmd": " chmod o-w <파일 이름> ",
+          "result": "조치 성공 (일반 사용자 쓰기 권한 제거)"
+         } |  to_json(ensure_ascii=False)
+        }}
+      when: "'U_25_1' in flag_list" 
+
+    - name: " 소유자가 존재하지 않는 파일 또는 디렉터리 제거"
+      file:
+       path: "{{item}}"
+       state: absent
+      loop: "{{ world_writable_files.stdout_lines }}"
+      when: world_writable_files.stdout_lines | length > 0
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+         {
+          "ts": ts_stderr,
+          "flag_id": "U_25_1",
+          "section": "[조치 내용]",
+          "title": "[U_25_1] (소유자가 존재하지 않는 파일 또는 디렉터리 제거)",
+          "cmd": " rm <파일 이름> ",
+          "result": "조치 성공 (소유자가 존재하지 않는 파일 또는 디렉터리 제거)"
+         } |  to_json(ensure_ascii=False)
+        }}
+      when: "'U_25_1' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}_U_25.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_25_1",
+              "status": 2, 
+              "description": "World Writable 파일 쓰기 권한 제거 및 소유자 권한 없는 파일 제거 완료 ",
+              "category": file,
+              "timestamp": ts_stdout
+             }
+           } |  to_json(ensure_ascii=False)
+        }}
+      changed_when: false
+      when: "'U_25_1' in flag_list"
+    

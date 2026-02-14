@@ -1,0 +1,368 @@
+---
+- name: "U-45 메일 서비스 버전 점검 및 비활성화 (이미지 가이드 반영)"
+  hosts: all
+  become: yes
+   
+
+  vars:
+   file: "service"
+   flag_list: []
+   ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+   ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+   STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+
+   log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+   json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: {{ansible_hostname| replace('-scan','')}}-remediate_U-54.log / .json
+   my_log_file: "{{ log_dir }}/{{ansible_hostname| replace('-scan','')}}-remediate"
+   my_json_file: "{{ json_dir }}/{{ansible_hostname| replace('-scan','')}}-remediate"
+  tasks: 
+     
+    # 1. 서비스 상태 확인 (가이드 공통 Step 1: 활성화 여부 확인)
+    - name: "1. 메일 서비스(Sendmail, Postfix, Exim) 상태 확인"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    # 2. [Sendmail] 조치
+    - name: "2. [Sendmail] 조치"
+      block:
+        - name: "Sendmail 버전 확인 (사용하는 경우)"
+          ansible.builtin.shell: "sendmail -d0.1 -bt < /dev/null | grep Version" # 가이드: sendmail -d0 -bt
+          register: sendmail_ver
+          when: 
+           - "'sendmail.service' in services_state.ansible_facts.services and services_state.ansible_facts.services['sendmail.service'].state == 'running'"
+           - "'U_45_1' in flag_list"
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}_U_45.log"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+            {
+             "ts": ts_stderr,
+              "flag_id": "U_45_1",
+              "section": "[조치 내용]",
+              "title": "[U_45_1] (Sendmail 버전 확인 후 업데이트)",
+             "cmd": "sendmail -d0.1 -bt < /dev/null | grep Version 이후 접속 후 다운로드 ",
+              "result": "조치 성공 (Sendmail 버전 확인 후 업데이트)"
+             } |  to_json(ensure_ascii=False)
+            }}
+          when: "'U_45_1' in flag_list" 
+
+        - name: "SYSOUT"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_json_file }}_U_45.json"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+                 {
+                 "meta": {
+                   "hostname": ansible_hostname,
+                   "ip": ansible_default_ipv4.address | default('N/A'),
+                   "user": ansible_user_id
+                 },
+                  "result": {
+                   "flag_id": "U_45_1",
+                   "status": 2, 
+                   "description": "Sendmail 버전 확인 후 업데이트 완료",
+                  "category": file,
+                  "timestamp": ts_stdout
+                  }
+                } |  to_json(ensure_ascii=False)
+             }}
+          changed_when: false
+          when: "'U_45_1' in flag_list" 
+
+        - name: "Sendmail 서비스 중지 및 비활성화 (사용하지 않는 경우)"
+          ansible.builtin.systemd:
+            name: sendmail
+            state: stopped
+            enabled: no
+          when: 
+           - "'sendmail.service' in services_state.ansible_facts.services and services_state.ansible_facts.services['sendmail.service'].state != 'running'"
+           - "'U_45_2' in flag_list"
+
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}_U_45.log"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+            {
+             "ts": ts_stderr,
+              "flag_id": "U_45_2",
+              "section": "[조치 내용]",
+              "title": "[U_45_2] (Sendmail 비활성화)",
+             "cmd": "svcadm disable sendmail",
+              "result": "조치 성공 (Sendmail 비활성화)"
+             } |  to_json(ensure_ascii=False)
+            }}
+          when: "'U_45_2' in flag_list" 
+
+        - name: "SYSOUT"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}_U_45.json"     # [필수] vars에 선언한 로그 파일 경로
+            create: yes                   # [옵션] 파일 없으면 생성
+            mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+            line: >-
+             {{
+                 {
+                 "meta": {
+                   "hostname": ansible_hostname,
+                   "ip": ansible_default_ipv4.address | default('N/A'),
+                   "user": ansible_user_id
+                 },
+                  "result": {
+                   "flag_id": "U_45_2",
+                   "status": 2, 
+                   "description": "Sendmail 비활성화 완료",
+                  "category": file,
+                  "timestamp": ts_stdout
+                  }
+                } |  to_json(ensure_ascii=False)
+             }}
+          changed_when: false
+          when: "'U_45_2' in flag_list" 
+
+    # 3. [Postfix] 조치
+    - name: "3. [Postfix] 조치"
+      block:
+        - name: "Postfix 버전 확인 (사용하는 경우)"
+          ansible.builtin.shell: "postconf mail_version" # 가이드: postconf mail_version
+          register: postfix_ver
+          when: 
+          - "'postfix.service' in services_state.ansible_facts.services and services_state.ansible_facts.services['postfix.service'].state == 'running'"
+          - "'U_45_3' in flag_list"
+
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}_U_45.log"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+            {
+             "ts": ts_stderr,
+              "flag_id": "U_45_3",
+              "section": "[조치 내용]",
+              "title": "[U_45_3] (Postfix 버전 확인 후 업데이트)",
+             "cmd": "/usr/lib/postfix/postconf | grep mail_version 이후 접속 후 다운로드 ",
+              "result": "조치 성공 (Postfix 버전 확인 후 업데이트)"
+             } |  to_json(ensure_ascii=False)
+            }}
+          when: "'U_45_3' in flag_list" 
+
+        - name: "SYSOUT"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}_U_45.json"     # [필수] vars에 선언한 로그 파일 경로
+            create: yes                   # [옵션] 파일 없으면 생성
+            mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+            line: >-
+             {{
+                 {
+                 "meta": {
+                   "hostname": ansible_hostname,
+                   "ip": ansible_default_ipv4.address | default('N/A'),
+                   "user": ansible_user_id
+                 },
+                  "result": {
+                   "flag_id": "U_45_3",
+                   "status": 2, 
+                   "description": "Postfix 버전 확인 후 업데이트 완료",
+                  "category": file,
+                  "timestamp": ts_stdout
+                  }
+                } |  to_json(ensure_ascii=False)
+             }}
+          changed_when: false
+          when: "'U_45_3' in flag_list" 
+
+        - name: "Postfix 서비스 종료 (사용하지 않는 경우)"
+          # 가이드: ps -ef | grep postfix 후 kill -9 <PID>
+          ansible.builtin.shell: "pkill -9 postfix"
+          when: 
+          - "'postfix.service' in services_state.ansible_facts.services and services_state.ansible_facts.services['postfix.service'].state != 'running'"
+          - "'U_45_4' in flag_list"
+          ignore_errors: yes
+
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}_U_45.log"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+            {
+             "ts": ts_stderr,
+              "flag_id": "U_45_4",
+              "section": "[조치 내용]",
+              "title": "[U_45_4] (postfix 비활성화)",
+             "cmd": "svcadm disable postfix",
+              "result": "조치 성공 (postfix 비활성화)"
+             } |  to_json(ensure_ascii=False)
+            }}
+          when: "'U_45_4' in flag_list" 
+
+        - name: "SYSOUT"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_json_file }}_U_45.json"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+                 {
+                 "meta": {
+                   "hostname": ansible_hostname,
+                   "ip": ansible_default_ipv4.address | default('N/A'),
+                   "user": ansible_user_id
+                 },
+                  "result": {
+                   "flag_id": "U_45_4",
+                   "status": 2, 
+                   "description": "postfix 비활성화 완료",
+                  "category": file,
+                  "timestamp": ts_stdout
+                  }
+                } |  to_json(ensure_ascii=False)
+             }}
+          changed_when: false
+          when: "'U_45_4' in flag_list" 
+
+    # 4. [Exim] 조치
+    - name: "4. [Exim] 조치"
+      block:
+        - name: "Exim 서비스 활성화 여부 확인 및 패치 안내 (사용하는 경우)"
+          ansible.builtin.debug:
+            msg: "Exim 서비스가 활성화되어 있습니다. 최신 버전 확인 및 보안 패치를 진행하십시오. (https://www.exim.org/)"
+          when: 
+          - "('exim.service' in services_state.ansible_facts.services or 'exim4.service' in services_state.ansible_facts.services)"
+          - "'U_45_5' in flag_list"
+
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}_U_45.log"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+            {
+             "ts": ts_stderr,
+              "flag_id": "U_45_5",
+              "section": "[조치 내용]",
+              "title": "[U_45_5] (exim 버전 확인 후 업데이트)",
+             "cmd": "usr/sbin/exim -bV 이후 접속 후 다운로드 ",
+              "result": "조치 성공 (exim 버전 확인 후 업데이트)"
+             } |  to_json(ensure_ascii=False)
+            }}
+          when: "'U_45_5' in flag_list" 
+
+        - name: "SYSOUT"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_json_file }}_U_45.json"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+                 {
+                 "meta": {
+                   "hostname": ansible_hostname,
+                   "ip": ansible_default_ipv4.address | default('N/A'),
+                   "user": ansible_user_id
+                 },
+                  "result": {
+                   "flag_id": "U_45_5",
+                   "status": 2, 
+                   "description": "exim 버전 확인 후 업데이트 완료",
+                  "category": file,
+                  "timestamp": ts_stdout
+                  }
+                } |  to_json(ensure_ascii=False)
+             }}
+          changed_when: false
+          when: "'U_45_5' in flag_list"
+
+        - name: "Exim 서비스 종료 (사용하지 않는 경우)"
+          # 가이드: ps -ef | grep exim 후 서비스 종료
+          ansible.builtin.shell: "pkill -9 exim"
+          when: 
+           - "('exim.service' in services_state.ansible_facts.services or 'exim4.service' in services_state.ansible_facts.services)"
+           - "'U_45_6' in flag_list"
+          ignore_errors: yes
+
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}_U_45.log"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+             {{
+             {
+             "ts": ts_stderr,
+              "flag_id": "U_45_6",
+              "section": "[조치 내용]",
+              "title": "[U_45_6] (exim 비활성화)",
+             "cmd": "svcadm disable postfix",
+              "result": "조치 성공 (exim 비활성화)"
+             } |  to_json(ensure_ascii=False)
+             }}
+          when: "'U_45_6' in flag_list" 
+
+        - name: "SYSOUT"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_json_file }}_U_45.json"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+                 {
+                 "meta": {
+                   "hostname": ansible_hostname,
+                   "ip": ansible_default_ipv4.address | default('N/A'),
+                   "user": ansible_user_id
+                 },
+                  "result": {
+                   "flag_id": "U_45_6",
+                   "status": 2, 
+                   "description": "exim 비활성화 완료",
+                  "category": file,
+                  "timestamp": ts_stdout
+                  }
+                } |  to_json(ensure_ascii=False)
+             }}
+          changed_when: false
+          when: "'U_45_6' in flag_list" 
+
+    - name: "5. 보안 패치 적용 "
+      ansible.builtin.package:
+        name: "{{ item }}"
+        state: latest
+      loop: ["sendmail", "postfix", "exim"]
+      when: "item + '.service' in services_state.ansible_facts.services"
