@@ -1,0 +1,84 @@
+---
+- name: 주요정보통신기반시설 보안 조치 - U-16 (/etc/passwd 파일 소유자 및 권한 설정)
+  hosts: all
+  become: yes
+
+  vars:
+    flag_list: []
+    ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+    STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: {{ansible_hostname| replace('-scan','')}}-remediate_U-54.log / .json
+    my_log_file: "{{ log_dir }}/{{ansible_hostname| replace('-scan','')}}-remediate"
+    my_json_file: "{{ json_dir }}/{{ansible_hostname| replace('-scan','')}}-remediate"  
+  tasks:
+      
+   # 1. 먼저 /etc/passwd 파일의 상태를 읽어서 변수에 저장해야 합니다.
+   - name: "/etc/passwd 파일 상태 확인"
+     ansible.builtin.stat:
+       path: /etc/passwd
+     register: passwd_stat
+
+   # 2. 확인된 변수(passwd_stat)를 바탕으로 조건부 실행을 합니다.
+   - name: "2. 소유자가 root가 아니거나 권한이 644보다 큰 경우 조치 (Remediation)"
+     ansible.builtin.file:
+       path: /etc/passwd
+       owner: root
+       group: root
+       mode: '0644'
+     # when은 ansible.builtin.file과 같은 라인에 위치해야 합니다.
+     when: >
+        passwd_stat.stat.exists and (
+        passwd_stat.stat.pw_name != 'root' or 
+        passwd_stat.stat.mode | int > 644 )
+
+   - name: "STDERR"
+     delegate_to: localhost          # [필수] Controller에 저장
+     become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+     ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}_U_16.log"   # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+         {{
+           {
+           "ts": ts_stderr,
+           "flag_id": "U_16_1",
+           "section": "[조치 내용]",
+           "title": "[U_16_1] (/etc/passwd의 파일 소유자 및 권한 변경)",
+           "cmd": " chown root /etc/passwd, chmod 644 /etc/passwd",
+           "result": "조치 성공 (/etc/passwd의 파일 소유자 및 권한 변경))"
+           } |   to_json(ensure_ascii=False)
+         }}
+     when: "'U_16_1' in flag_list"
+
+   - name: "SYSOUT"
+     delegate_to: localhost          # [필수] Controller에 저장
+     become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+     ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}_U_16.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+         {{
+           {
+             "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+             },
+             "result": {
+              "flag_id": "U_16_*",
+              "status": 2, 
+              "description": "/etc/passwd 파일 소유자 및 권한 설정 완료",
+              "category": "file",
+              "timestamp": ts_stdout
+             }
+           } |   to_json(ensure_ascii=False)
+         }}
+     changed_when: false
+     when: "'U_16_1' in flag_list"
