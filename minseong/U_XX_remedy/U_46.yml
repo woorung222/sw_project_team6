@@ -1,0 +1,206 @@
+---
+- name: "U-46 일반 사용자의 메일 서비스 실행 방지"
+  hosts: all
+  become: yes
+   
+
+  vars:
+   file: "service"
+   flag_list: []
+   ts_stderr: "{{ ansible_date_time.iso8601 }}" # 2026-02-11T16:45:12Z
+   ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}" # 2026_02_11 / 12:13:28
+   STATUS: 0 # yaml코드 실행 성공 여부 / 0: 시작 1: 중간 2: 완료
+
+   log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+   json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+
+    # 파일명 규칙: {{ansible_hostname| replace('-scan','')}}-remediate_U-54.log / .json
+   my_log_file: "{{ log_dir }}/{{ansible_hostname| replace('-scan','')}}-remediate"
+   my_json_file: "{{ json_dir }}/{{ansible_hostname| replace('-scan','')}}-remediate"
+  tasks: 
+    
+    # 1. 공통: 메일 서비스를 사용하지 않는 경우 서비스 중지 (조치 방법 기준)
+    - name: "1. 메일 서비스 활성화 여부 확인"
+      ansible.builtin.service_facts:
+      register: services_state
+
+    # 2. [Sendmail] 조치 
+    - name: "[Sendmail] PrivacyOptions 설정 강화"
+      block:
+        - name: "Sendmail 설정 파일 내 restrictqrun 옵션 추가"
+          ansible.builtin.replace:
+            path: /etc/mail/sendmail.cf
+            regexp: '^O\s+PrivacyOptions=(.*)'
+            replace: 'O PrivacyOptions=\1,restrictqrun'
+          register: sendmail_conf_update
+          # 이미 설정되어 있는지 확인하여 중복 추가 방지
+          when: 
+          - "('sendmail.service' in services_state.ansible_facts.services) and ('restrictqrun' not in lookup('file', '/etc/mail/sendmail.cf'))"
+          - "'U_46_1' in flag_list"
+
+        - name: "Sendmail 서비스 재시작"
+          ansible.builtin.systemd:
+            name: sendmail
+            state: restarted
+          when: 
+          - sendmail_conf_update.changed
+          - "'U_46_1' in flag_list"
+        
+        - name: "STDERR"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_log_file }}_U_46.log"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+            {
+              "ts": ts_stderr,
+              "flag_id": "U_46_1",
+              "section": "[조치 내용]",
+              "title": "[U_46_1] (Sendmail 설정 파일 내 restrictqrun 옵션 추가)",
+              "cmd": " PrivacyOptions = authwarnings, novrfy, noexpn, restrictqrun",
+              "result": "조치 성공 (Sendmail 설정 파일 내 restrictqrun 옵션 추가)"
+            } |  to_json(ensure_ascii=False)
+            }}
+          when: "'U_46_1' in flag_list" 
+
+        - name: "SYSOUT"
+          delegate_to: localhost          # [필수] Controller에 저장
+          become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+          ansible.builtin.lineinfile:
+           path: "{{ my_json_file }}_U_46.json"     # [필수] vars에 선언한 로그 파일 경로
+           create: yes                   # [옵션] 파일 없으면 생성
+           mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+           line: >-
+            {{
+                {
+                "meta": {
+                  "hostname": ansible_hostname,
+                  "ip": ansible_default_ipv4.address | default('N/A'),
+                  "user": ansible_user_id
+                },
+               "result": {
+                "flag_id": "U_46_1",
+               "status": 2, 
+               "description": "Sendmail 설정 파일 내 restrictqrun 옵션 추가 완료 ",
+               "category": file,
+               "timestamp": ts_stdout
+             }
+              } |  to_json(ensure_ascii=False)
+            }}
+          changed_when: false
+          when: "'U_46_1' in flag_list"
+
+    # 3. [Postfix] 조치 
+    - name: "3. [Postfix] postsuper 실행 권한 제거"
+      ansible.builtin.file:
+        path: /usr/sbin/postsuper
+        mode: 'o-x' # 일반 사용자(others)의 실행(x) 권한 제거
+      when: 
+      - "'postfix.service' in services_state.ansible_facts.services"
+      - "'U_46_2' in flag_list"
+
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_log_file }}_U_46.log"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+           {{
+             {
+             "ts": ts_stderr,
+             "flag_id": "U_46_2",
+             "section": "[조치 내용]",
+             "title": "[U_46_2] ([Postfix] postsuper 실행 권한 제거)",
+             "cmd": "chmod o-x /usr/sbin/postsuper ",
+             "result": "조치 성공 ([Postfix] postsuper 실행 권한 제거)"
+             } |  to_json(ensure_ascii=False)
+           }}
+      when: "'U_46_2' in flag_list" 
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}_U_46.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+            "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+            },
+           "result": {
+            "flag_id": "U_46_2",
+           "status": 2, 
+           "description": "[Postfix] postsuper 실행 권한 제거 완료 ",
+           "category": file,
+           "timestamp": ts_stdout
+         }
+          } |  to_json(ensure_ascii=False)
+        }}
+      changed_when: false
+      when: "'U_46_2' in flag_list"
+
+      
+
+    # 4. [Exim] 조치 
+    - name: "4. [Exim] exiqgrep 실행 권한 제거"
+      ansible.builtin.file:
+        path: /usr/sbin/exiqgrep
+        mode: 'o-x' # 일반 사용자(others)의 실행(x) 권한 제거
+      when: 
+      - "'exim.service' in services_state.ansible_facts.services or 'exim4.service' in services_state.ansible_facts.services"
+      - "'U_46_3' in flag_list"
+    - name: "STDERR"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+        path: "{{ my_log_file }}_U_46.log"     # [필수] vars에 선언한 로그 파일 경로
+        create: yes                   # [옵션] 파일 없으면 생성
+        mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+        line: >-
+           {{
+           {
+            "ts": ts_stderr,
+            "flag_id": "U_46_3",
+            "section": "[조치 내용]",
+            "title": "[U_46_3] ([Exim] exiqgrep 실행 권한 제거)",
+            "cmd": " chmod o-x /usr/sbin/exiqgrep ",
+            "result": "조치 성공 ([Exim] exiqgrep 실행 권한 제거)"
+           } |  to_json(ensure_ascii=False)
+           }}
+      when: "'U_46_3' in flag_list" 
+
+    - name: "SYSOUT"
+      delegate_to: localhost          # [필수] Controller에 저장
+      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
+      ansible.builtin.lineinfile:
+       path: "{{ my_json_file }}_U_46.json"     # [필수] vars에 선언한 로그 파일 경로
+       create: yes                   # [옵션] 파일 없으면 생성
+       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
+       line: >-
+        {{
+            {
+            "meta": {
+              "hostname": ansible_hostname,
+              "ip": ansible_default_ipv4.address | default('N/A'),
+              "user": ansible_user_id
+            },
+           "result": {
+            "flag_id": "U_46_3",
+           "status": 2, 
+           "description": "[Exim] exiqgrep 실행 권한 제거 완료 ",
+           "category": file,
+           "timestamp": ts_stdout
+         }
+          } |  to_json(ensure_ascii=False)
+        }}
+      changed_when: false
+      when: "'U_46_3' in flag_list"
