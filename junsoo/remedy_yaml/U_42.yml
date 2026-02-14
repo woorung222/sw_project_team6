@@ -1,13 +1,25 @@
----
-- name: "U-42 | Disable Unnecessary RPC Services (Logs-Only JSONL)"
+- name: "[U_42] Disable Unnecessary RPC Services"
   hosts: all
   become: yes
-  gather_facts: no
-
   vars:
-    FLAG_ID: "U-42"
+    # 1. Flag List (Control Node에서 주입됨)
+    flag_list: []
+    flag_id_main: "U_42"
+    category: "service"
+
+    # 2. 타임스탬프 정의
+    ts_stderr: "{{ ansible_date_time.iso8601 }}"
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}"
+
+    # 3. 로그 파일 경로 정의
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
     
-    # 주요기반시설 가이드 및 스크립트 기반 RPC 서비스 목록
+    # 파일명 규칙
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.json"
+
+    # 차단 대상 RPC 서비스 목록 (가이드 및 진단 스크립트 기준)
     rpc_services:
       - rpcbind
       - rpc.cmsd
@@ -26,185 +38,334 @@
       - kcms_server
       - cachefsd
 
-    inetd_conf: "/etc/inetd.conf"
-    xinetd_dir: "/etc/xinetd.d"
-
-    LOG_SECTION_STEP: "[조치 내용]"
-    LOG_SECTION_BASIS: "[조치 결과]"
-    LOG_TITLE_BASIS: "조치 근거"
-    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
-
   tasks:
-    # ---------------------------------------------------------
-    # (공통) 변수 초기화
-    # ---------------------------------------------------------
-    - name: "U-42 | init defaults"
-      ansible.builtin.set_fact:
-        r_inetd: {}
-        r_inetd_restart: {}
-        r_xinetd: {}
-        r_xinetd_restart: {}
-        r_systemd: []
-      changed_when: false
-
     # =========================================================
-    # 조치 1) inetd: /etc/inetd.conf 내 RPC 서비스 주석 처리
+    # 1. [U_42_1] inetd.conf 설정 조치
     # =========================================================
-    - name: "U-42 | [U_42_1] inetd.conf 파일 확인"
-      stat:
-        path: "{{ inetd_conf }}"
-      register: st_inetd
-
-    - name: "U-42 | [U_42_1] inetd RPC 서비스 주석 처리"
-      ansible.builtin.replace:
-        path: "{{ inetd_conf }}"
-        # 주석(#)이 없으면서 RPC 서비스명이 포함된 라인을 찾음
-        regexp: '^(?![[:space:]]*#).*(?:{{ rpc_services | join("|") }}).*'
-        replace: '# \g<0>'
-        backup: yes
-      register: r_inetd
-      when: st_inetd.stat.exists
-
-    - name: "U-42 | [U_42_1] inetd 재시작"
-      ansible.builtin.systemd:
-        name: "inetd"
-        state: restarted
-      when: st_inetd.stat.exists and r_inetd.changed
-      register: r_inetd_restart
-      failed_when: false
-
-    # inetd 조치 결과 로그
-    - name: "U-42 | [U_42_1] inetd 조치 결과 LOG"
+    - name: "[U_42_1] Disable RPC services in /etc/inetd.conf"
+      when: "'U_42_1' in flag_list"
       block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_421
-          changed_when: false
+        # 1-1. 설정 파일 수정 (주석 처리)
+        - name: "[U_42_1] Comment out RPC services in inetd.conf"
+          replace:
+            path: /etc/inetd.conf
+            regexp: '^([[:space:]]*({{ rpc_services | join("|") }})[[:space:]].*)$'
+            replace: '# \1'
+          register: r_inetd_rpc
 
-        - name: "LOG basis"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_421.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_BASIS,
-                  "title": "[U_42_1] inetd 내 RPC 서비스 비활성화",
-                  "basis": (
-                    st_inetd.stat.exists | ternary(
-                      "[U_42_1] inetd.conf 내 RPC 서비스 " ~ (r_inetd.changed | ternary("주석 처리 완료", "발견되지 않음/이미 조치됨")) ~ " / 서비스 재시작 " ~ (r_inetd_restart.changed | default(false) | ternary("성공", "불필요")),
-                      "[U_42_1] inetd.conf 파일이 없어 조치 생략"
-                    )
-                  ),
-                  "status": (r_inetd.changed | default(false) | ternary("취약", "양호"))
-                } | to_json
-              }}
-          changed_when: false
+        # 1-2. inetd 서비스 재시작
+        - name: "[U_42_1] Restart inetd service"
+          service:
+            name: inetd
+            state: restarted
+          when: r_inetd_rpc.changed
+          ignore_errors: yes
+
+        # 1-3. [Control Node] 로그 기록
+        - name: "Log U_42_1 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_42_1",
+                "section": "[조치 결과]",
+                "title": "[U_42_1] inetd.conf 내 RPC 서비스 비활성화 성공",
+                "cmd": "Comment out RPC services in /etc/inetd.conf",
+                "result": "조치 성공 (status: 2)"
+              }
+
+        # 1-4. [Control Node] JSON 기록
+        - name: "Log U_42_1 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_42_1",
+                  "status": 2,
+                  "description": "inetd.conf 파일 내 RPC 서비스 주석 처리 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_42_1 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_42_1",
+                  "status": 0,
+                  "description": "조치 실패: inetd.conf 수정 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_42_1 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_42_1",
+                "section": "[조치 결과]",
+                "title": "[U_42_1] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - 파일 존재 여부 확인 필요"
+              }
+
 
     # =========================================================
-    # 조치 2) xinetd: /etc/xinetd.d/ 내 RPC 서비스 disable = yes
+    # 2. [U_42_2] xinetd 설정 조치
     # =========================================================
-    - name: "U-42 | [U_42_2] xinetd 디렉토리 확인"
-      stat:
-        path: "{{ xinetd_dir }}"
-      register: st_xinetd
-
-    - name: "U-42 | [U_42_2] xinetd 내 RPC 서비스 검색 및 비활성화"
-      # xinetd.d 폴더 내에서 RPC 목록에 해당하는 파일이 있으면 disable = yes 로 변경
-      # (복잡성을 줄이기 위해 shell 모듈과 sed 사용, Ansible file module로는 동적 파일 매칭이 어려움)
-      shell: |
-        changed=0
-        for service in {{ rpc_services | join(" ") }}; do
-          if [ -f "{{ xinetd_dir }}/$service" ]; then
-            # disable = no 가 있는지 확인
-            if grep -Eq "^\s*disable\s*=\s*no" "{{ xinetd_dir }}/$service"; then
-              sed -i 's/^\(\s*disable\s*=\s*\)no/\1yes/g' "{{ xinetd_dir }}/$service"
-              changed=1
-            fi
-          fi
-        done
-        echo $changed
-      register: r_xinetd
-      when: st_xinetd.stat.exists and st_xinetd.stat.isdir
-      changed_when: "r_xinetd.stdout == '1'"
-
-    - name: "U-42 | [U_42_2] xinetd 재시작"
-      ansible.builtin.systemd:
-        name: "xinetd"
-        state: restarted
-      when: st_xinetd.stat.exists and (r_xinetd.changed | default(false))
-      register: r_xinetd_restart
-      failed_when: false
-
-    # xinetd 조치 결과 로그
-    - name: "U-42 | [U_42_2] xinetd 조치 결과 LOG"
+    - name: "[U_42_2] Disable RPC services in xinetd"
+      when: "'U_42_2' in flag_list"
       block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_422
-          changed_when: false
+        # 2-1. xinetd 서비스 파일 확인 (존재하는 파일만 골라냄)
+        - name: "[U_42_2] Check xinetd service files"
+          stat:
+            path: "/etc/xinetd.d/{{ item }}"
+          loop: "{{ rpc_services }}"
+          register: r_xinetd_files
 
-        - name: "LOG basis"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_422.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_BASIS,
-                  "title": "[U_42_2] xinetd 내 RPC 서비스 비활성화",
-                  "basis": (
-                    st_xinetd.stat.exists | ternary(
-                      "[U_42_2] xinetd.d 내 RPC 서비스 " ~ (r_xinetd.changed | ternary("disable=yes 설정 완료", "활성화된 서비스 없음")) ~ " / 서비스 재시작 " ~ (r_xinetd_restart.changed | default(false) | ternary("성공", "불필요")),
-                      "[U_42_2] xinetd 디렉토리가 없어 조치 생략"
-                    )
-                  ),
-                  "status": (r_xinetd.changed | default(false) | ternary("취약", "양호"))
-                } | to_json
-              }}
-          changed_when: false
+        # 2-2. 존재하는 파일에 대해 disable = yes 설정
+        - name: "[U_42_2] Set disable=yes for existing RPC files"
+          lineinfile:
+            path: "{{ item.stat.path }}"
+            regexp: '^[[:space:]]*disable[[:space:]]*='
+            line: '        disable = yes'
+            state: present
+          loop: "{{ r_xinetd_files.results }}"
+          when: item.stat.exists
+          register: r_xinetd_rpc
+
+        # 2-3. xinetd 서비스 재시작
+        - name: "[U_42_2] Restart xinetd service"
+          service:
+            name: xinetd
+            state: restarted
+          when: r_xinetd_rpc.changed
+          ignore_errors: yes
+
+        # 2-4. [Control Node] 로그 기록
+        - name: "Log U_42_2 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_42_2",
+                "section": "[조치 결과]",
+                "title": "[U_42_2] xinetd RPC 서비스 비활성화 성공",
+                "cmd": "Update /etc/xinetd.d/* (disable = yes)",
+                "result": "조치 성공 (status: 2)"
+              }
+
+        # 2-5. [Control Node] JSON 기록
+        - name: "Log U_42_2 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_42_2",
+                  "status": 2,
+                  "description": "xinetd RPC 서비스 설정 변경(disable=yes) 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_42_2 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_42_2",
+                  "status": 0,
+                  "description": "조치 실패: xinetd 설정 파일 수정 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_42_2 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_42_2",
+                "section": "[조치 결과]",
+                "title": "[U_42_2] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - 파일 권한 확인 필요"
+              }
+
 
     # =========================================================
-    # 조치 3) systemd: RPC 서비스 stop & disable
+    # 3. [U_42_3] Systemd 서비스 중지 (rpcbind 등)
     # =========================================================
-    - name: "U-42 | [U_42_3] systemd 서비스 상태 확인 및 조치"
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        state: stopped
-        enabled: no
-      loop: "{{ rpc_services }}"
-      register: r_systemd_results
-      ignore_errors: yes  # 존재하지 않는 서비스는 에러 무시
-      
-    # Systemd 조치 결과 집계 및 로그
-    - name: "U-42 | [U_42_3] systemd 조치 결과 집계 LOG"
+    - name: "[U_42_3] Stop RPC Systemd Services"
+      when: "'U_42_3' in flag_list"
       block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_423
-          changed_when: false
+        # 3-1. 서비스 중지 및 비활성화 (주요 대상: rpcbind)
+        - name: "[U_42_3] Stop RPC services"
+          service:
+            name: "{{ item }}"
+            state: stopped
+            enabled: no
+          loop: "{{ rpc_services }}"
+          # rpcbind는 소켓도 함께 내려야 할 수 있음
+          ignore_errors: yes
 
-        - name: "결과 집계 파싱"
-          set_fact:
-            # 변경된(조치된) 서비스 목록 추출
-            changed_services: "{{ r_systemd_results.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list }}"
+        - name: "[U_42_3] Stop specific sockets (rpcbind.socket)"
+          service:
+            name: rpcbind.socket
+            state: stopped
+            enabled: no
+          ignore_errors: yes
 
-        - name: "LOG basis"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_423.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_BASIS,
-                  "title": "[U_42_3] Systemd RPC 서비스 중지 및 비활성화",
-                  "basis": (
-                    (changed_services | length > 0) | ternary(
-                      "[U_42_3] 조치된 서비스: " ~ (changed_services | join(", ")),
-                      "[U_42_3] 활성화된 불필요 RPC 서비스가 발견되지 않음(양호)"
-                    )
-                  ),
-                  "status": ((changed_services | length > 0) | ternary("취약", "양호"))
-                } | to_json
-              }}
-          changed_when: false
+        # 3-2. [Control Node] 로그 기록
+        - name: "Log U_42_3 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_42_3",
+                "section": "[조치 결과]",
+                "title": "[U_42_3] RPC Systemd 서비스 중지 성공",
+                "cmd": "systemctl stop/disable rpcbind and others",
+                "result": "조치 성공 (status: 2)"
+              }
+
+        # 3-3. [Control Node] JSON 기록
+        - name: "Log U_42_3 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_42_3",
+                  "status": 2,
+                  "description": "RPC Systemd 서비스(rpcbind 등) 중지 및 비활성화 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_42_3 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_42_3",
+                  "status": 0,
+                  "description": "조치 실패: 서비스 중지 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_42_3 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_42_3",
+                "section": "[조치 결과]",
+                "title": "[U_42_3] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
+              }

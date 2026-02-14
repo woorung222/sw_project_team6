@@ -1,103 +1,160 @@
----
-- name: "U-04 | Password File Protection (Shadow Suite)"
+- name: "[U_04] Remediate Password File Protection"
   hosts: all
   become: yes
-  gather_facts: no
-
   vars:
-    FLAG_ID: "U-04"
-    passwd_file: "/etc/passwd"
-    shadow_file: "/etc/shadow"
+    # 1. Flag List (Control Node에서 주입됨)
+    flag_list: []
+    
+    flag_id_main: "U_04"
+    category: "account"
 
-    # 로그 관련 변수
-    LOG_SECTION_STEP: "[조치 내용]"
-    LOG_SECTION_BASIS: "[조치 결과]"
-    LOG_TITLE_BASIS: "조치 근거"
-    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    # 2. 타임스탬프 정의
+    ts_stderr: "{{ ansible_date_time.iso8601 }}"
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}"
+
+    # 3. 로그 파일 경로 정의
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+    
+    # 파일명 규칙
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.json"
 
   tasks:
-    # ---------------------------------------------------------
-    # (공통) 변수 초기화
-    # ---------------------------------------------------------
-    - name: "U-04 | init defaults"
-      ansible.builtin.set_fact:
-        r_pwconv: {}
-        vuln_accounts: []
-      changed_when: false
-
     # =========================================================
-    # 1. 진단: Shadow 패스워드 미사용 계정 식별
-    #    /etc/passwd의 2번째 필드가 'x'가 아닌 계정 찾기
+    # 1. [U_04_1] 쉐도우 패스워드 사용 설정 및 권한 조치
     # =========================================================
-    - name: "U-04 | Check for non-shadowed passwords in /etc/passwd"
-      ansible.builtin.shell: |
-        awk -F: '$2 != "x" {print $1}' {{ passwd_file }}
-      register: r_check_passwd
-      changed_when: false
-      failed_when: false
-
-    - name: "U-04 | Set vulnerability status"
-      ansible.builtin.set_fact:
-        vuln_accounts: "{{ r_check_passwd.stdout_lines | default([]) }}"
-      changed_when: false
-
-    # =========================================================
-    # 2. 조치: pwconv 실행 (취약 계정이 발견된 경우에만)
-    # =========================================================
-    - name: "U-04 | Apply Shadow Password Suite (pwconv)"
-      ansible.builtin.command:
-        cmd: "pwconv"
-      register: r_pwconv
-      when: vuln_accounts | length > 0
-
-    # =========================================================
-    # 3. 결과 로깅
-    # =========================================================
-    - name: "U-04 | 조치 내용 상세 LOG"
+    - name: "[U_04_1] Block for Shadow Password Remediation"
+      when: "'U_04_1' in flag_list"
       block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_step
+        # -----------------------------------------------------
+        # 실제 조치 태스크 시작
+        # -----------------------------------------------------
+        
+        # 1-1. 쉐도우 파일 존재 여부 확인
+        - name: "[U_04_1] Check if /etc/shadow exists"
+          stat:
+            path: /etc/shadow
+          register: st_shadow
+
+        # 1-2. pwconv 실행 (쉐도우 시스템 적용)
+        - name: "[U_04_1] Execute pwconv to enable shadow passwords"
+          command: pwconv
+          register: r_pwconv
+          changed_when: false # pwconv는 변경사항 감지가 어려우므로 false 처리 후 아래에서 검증
+
+        # 1-3. [추가됨] /etc/passwd 권한 설정 (소유자: root, 권한: 644)
+        - name: "[U_04_1] Secure /etc/passwd permissions"
+          file:
+            path: /etc/passwd
+            owner: root
+            group: root
+            mode: '0644'
+
+        # 1-4. [추가됨] /etc/shadow 권한 설정 (소유자: root, 권한: 600 - others 권한 제거)
+        # Ubuntu 진단 기준: Other 권한이 0이어야 함 (예: 400, 600)
+        - name: "[U_04_1] Secure /etc/shadow permissions"
+          file:
+            path: /etc/shadow
+            owner: root
+            group: root
+            mode: '0600'
+
+        # 1-5. 검증: /etc/passwd의 두 번째 필드가 'x'인지 확인 (root 계정 기준)
+        - name: "[U_04_1] Verify root password field in /etc/passwd"
+          shell: "grep '^root:' /etc/passwd | awk -F: '{print $2}'"
+          register: r_verify_passwd
           changed_when: false
 
-        - name: "LOG step"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_step.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_STEP,
-                  "title": "Shadow 패스워드 시스템 전환 (pwconv)",
-                  "cmd": "pwconv",
-                  "result": "attempted=" ~ ((vuln_accounts | length > 0) | bool | string) ~
-                            ", changed=" ~ ((r_pwconv.changed | default(false)) | bool | string) ~
-                            ", target_accounts=" ~ (vuln_accounts | join(", ") if (vuln_accounts | length > 0) else "None")
-                } | to_json
-              }}
-          changed_when: false
+        # 검증 실패 시 에러 발생 (Rescue 블록으로 이동)
+        - name: "[U_04_1] Fail if root password is not 'x'"
+          fail:
+            msg: "Remediation failed: root password field is not 'x' after pwconv."
+          when: r_verify_passwd.stdout != 'x'
 
-    - name: "U-04 | 최종 결과 근거 LOG"
-      block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_basis
-          changed_when: false
+        # -----------------------------------------------------
+        # 실제 조치 태스크 끝
+        # -----------------------------------------------------
 
-        - name: "LOG basis"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_basis.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_BASIS,
-                  "title": LOG_TITLE_BASIS,
-                  "basis": (
-                    "Shadow 패스워드 정책 " ~
-                    (((vuln_accounts | length > 0) and (r_pwconv.changed | default(false))) | ternary("적용됨(pwconv 수행)", "이미 적용됨(조치 불필요)"))
-                  ),
-                  "status": (((vuln_accounts | length > 0) and (r_pwconv.changed | default(false))) | ternary("취약(조치완료)", "양호"))
-                } | to_json
-              }}
-          changed_when: false
+        # [성공 로그: Status 2]
+        - name: "Log U_04_1 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_04_1",
+                  "status": 2,
+                  "description": "쉐도우 시스템 적용(pwconv) 및 파일 권한(passwd/shadow) 보안 설정 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_04_1 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_04_1",
+                "section": "[조치 결과]",
+                "title": "[U_04_1] 패스워드 파일 보호 설정 성공",
+                "cmd": "pwconv 실행, passwd(644)/shadow(600) 권한 설정 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_04_1 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_04_1",
+                  "status": 0,
+                  "description": "조치 실패: pwconv 실행 또는 파일 권한 설정 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_04_1 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_04_1",
+                "section": "[조치 결과]",
+                "title": "[U_04_1] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - 상세 에러는 Ansible 로그 확인 필요"
+              }

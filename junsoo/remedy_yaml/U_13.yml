@@ -16,8 +16,8 @@
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
     
     # 파일명 규칙
-    my_log_file: "{{ log_dir }}/{{ ansible_hostname }}-remediate_{{ flag_id_main }}.log"
-    my_json_file: "{{ json_dir }}/{{ ansible_hostname }}-remediate_{{ flag_id_main }}.json"
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.json"
 
   tasks:
     # =========================================================

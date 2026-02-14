@@ -1,180 +1,249 @@
----
-- name: "U-01 | Restrict Root Remote Access (SSH/Telnet)"
+- name: "[U_01] Remediate Root Remote Access Restriction"
   hosts: all
   become: yes
-  gather_facts: no
-
   vars:
-    FLAG_ID: "U-01"
+    # 1. Flag List (Control Node에서 주입됨)
+    flag_list: []
     
-    # 설정 파일 경로 정의
-    sshd_config: "/etc/ssh/sshd_config"
-    pam_login: "/etc/pam.d/login"
-    securetty: "/etc/securetty"
+    flag_id_main: "U_01"
+    category: "account"
 
-    # 로그 관련 변수
-    LOG_SECTION_STEP: "[조치 내용]"
-    LOG_SECTION_BASIS: "[조치 결과]"
-    LOG_TITLE_BASIS: "조치 근거"
-    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+    # 2. 타임스탬프 정의
+    ts_stderr: "{{ ansible_date_time.iso8601 }}"
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}"
+
+    # 3. 로그 파일 경로 정의
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+    
+    # 파일명 규칙
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.json"
 
   tasks:
-    # ---------------------------------------------------------
-    # (공통) 변수 초기화
-    # ---------------------------------------------------------
-    - name: "U-01 | init defaults"
-      ansible.builtin.set_fact:
-        r_sshd_config: {}
-        r_sshd_restart: {}
-        r_securetty: {}
-        r_pam: {}
-      changed_when: false
-
     # =========================================================
-    # 1. SSH 조치: PermitRootLogin No 설정
+    # 1. [U_01_1] Telnet root 접속 제한 (PAM & Securetty)
     # =========================================================
-    
-    # 1-1. sshd_config 파일 존재 확인 및 조치
-    - name: "U-01 | [SSH] PermitRootLogin no 설정"
-      ansible.builtin.replace:
-        path: "{{ sshd_config }}"
-        # 주석(#) 여부 관계없이 PermitRootLogin 설정 라인을 찾음
-        regexp: '^(?i)\s*#?\s*PermitRootLogin\s+.*'
-        replace: 'PermitRootLogin no'
-        backup: yes
-      register: r_sshd_config
-      when: sshd_config is file
-
-    # 1-2. 파일 내에 PermitRootLogin 설정이 아예 없었을 경우 (append)
-    - name: "U-01 | [SSH] PermitRootLogin no 추가 (설정 없을 시)"
-      ansible.builtin.lineinfile:
-        path: "{{ sshd_config }}"
-        line: "PermitRootLogin no"
-        state: present
-        create: no
-      when: 
-        - sshd_config is file
-        - r_sshd_config.msg is defined and "pattern not found" in r_sshd_config.msg
-      register: r_sshd_config_add
-
-    # 1-3. SSH 조치 결과 로깅
-    - name: "U-01 | [SSH] 조치 로그 기록"
+    - name: "[U_01_1] Block for Telnet Root Access Remediation"
+      when: "'U_01_1' in flag_list"
       block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_ssh
-          changed_when: false
+        # -----------------------------------------------------
+        # 실제 조치 태스크 시작
+        # -----------------------------------------------------
+        - name: "[U_01_1] Configure /etc/pam.d/login for pam_securetty"
+          lineinfile:
+            path: /etc/pam.d/login
+            state: present
+            insertafter: EOF
+            line: 'auth required pam_securetty.so'
+            regexp: '^auth\s+required\s+.*pam_securetty\.so'
+          register: r_pam
 
-        - name: "LOG step (SSH)"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_ssh.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_STEP,
-                  "title": "[SSH] PermitRootLogin 설정 변경",
-                  "cmd": "replace/lineinfile: path=" ~ sshd_config ~ " line='PermitRootLogin no'",
-                  "result": "changed=" ~ (((r_sshd_config.changed | default(false)) or (r_sshd_config_add.changed | default(false))) | bool | string)
-                } | to_json
-              }}
-          changed_when: false
+        - name: "[U_01_1] Check if /etc/securetty exists"
+          stat:
+            path: /etc/securetty
+          register: st_securetty
 
-    # 1-4. SSH 서비스 재시작 (설정이 변경된 경우에만)
-    - name: "U-01 | [SSH] 서비스 재시작"
-      ansible.builtin.service:
-        name: sshd
-        state: restarted
-      when: (r_sshd_config.changed | default(false)) or (r_sshd_config_add.changed | default(false))
-      register: r_sshd_restart
-      failed_when: false
+        - name: "[U_01_1] Comment out pts in /etc/securetty"
+          replace:
+            path: /etc/securetty
+            regexp: '^(pts/.*)$'
+            replace: '#\1'
+          when: st_securetty.stat.exists
+          register: r_securetty
+        # -----------------------------------------------------
+        # 실제 조치 태스크 끝
+        # -----------------------------------------------------
+
+        # [성공 로그: Status 2]
+        - name: "Log U_01_1 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_01_1",
+                  "status": 2,
+                  "description": "Telnet Root 접속 제한(pam_securetty, securetty) 조치 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_01_1 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_01_1",
+                "section": "[조치 결과]",
+                "title": "[U_01_1] Telnet Root 접속 제한 설정 성공",
+                "cmd": "pam_securetty.so 설정 및 securetty 수정 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_01_1 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_01_1",
+                  "status": 0,
+                  "description": "조치 실패: Telnet Root 접속 제한 설정 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_01_1 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_01_1",
+                "section": "[조치 결과]",
+                "title": "[U_01_1] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - 상세 에러는 Ansible 로그 확인 필요"
+              }
 
     # =========================================================
-    # 2. Telnet 조치: securetty 및 pam.d/login 설정
+    # 2. [U_01_2] SSH root 접속 제한 (PermitRootLogin No)
     # =========================================================
-
-    # 2-1. /etc/securetty 내 pts/x 주석 처리
-    # (참고: Ubuntu 20.04+ 등 최신 OS는 securetty 파일이 없을 수 있음. 파일이 있을 때만 수행)
-    - name: "U-01 | [Telnet] securetty 내 pts 라인 주석 처리"
-      ansible.builtin.replace:
-        path: "{{ securetty }}"
-        regexp: '^(pts/\d+)'
-        replace: '#\1'
-        backup: yes
-      register: r_securetty
-      when: securetty is file
-
-    # 2-2. /etc/pam.d/login 내 pam_securetty.so 모듈 추가
-    # (이미 설정되어 있는지 확인 후 없으면 상단에 추가)
-    - name: "U-01 | [Telnet] pam.d/login 내 pam_securetty.so 추가"
-      ansible.builtin.lineinfile:
-        path: "{{ pam_login }}"
-        # 주석이 아닌 라인 중 pam_securetty.so가 있는지 확인
-        regexp: '^\s*auth\s+required\s+.*pam_securetty\.so'
-        line: 'auth required pam_securetty.so'
-        state: present
-        insertbefore: BOF
-        backup: yes
-      register: r_pam
-      when: pam_login is file
-
-    # 2-3. Telnet 조치 결과 로깅
-    - name: "U-01 | [Telnet] 조치 로그 기록"
+    - name: "[U_01_2] Block for SSH Root Access Remediation"
+      when: "'U_01_2' in flag_list"
       block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_telnet
-          changed_when: false
+        # -----------------------------------------------------
+        # 실제 조치 태스크 시작
+        # -----------------------------------------------------
+        - name: "[U_01_2] Edit sshd_config to deny root login"
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?PermitRootLogin'
+            line: 'PermitRootLogin no'
+            state: present
+            validate: /usr/sbin/sshd -t -f %s
+          register: r_sshd_config
 
-        - name: "LOG step (Telnet)"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_telnet.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_STEP,
-                  "title": "[Telnet] 접속 제한 설정 (securetty/pam)",
-                  "cmd": "securetty 주석 처리 및 pam.d/login 모듈 추가",
-                  "result": "securetty_changed=" ~ ((r_securetty.changed | default(false)) | bool | string) ~
-                            ", pam_changed=" ~ ((r_pam.changed | default(false)) | bool | string)
-                } | to_json
-              }}
-          changed_when: false
+        - name: "[U_01_2] Restart SSH service"
+          service:
+            name: sshd
+            state: restarted
+          when: r_sshd_config.changed
+        # -----------------------------------------------------
+        # 실제 조치 태스크 끝
+        # -----------------------------------------------------
 
-    # =========================================================
-    # 3. 최종 결과 보고 (Basis Log)
-    # =========================================================
-    - name: "U-01 | 최종 결과 근거 LOG"
-      block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_basis
-          changed_when: false
+        # [성공 로그: Status 2]
+        - name: "Log U_01_2 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_01_2",
+                  "status": 2,
+                  "description": "SSH Root 접속 차단(PermitRootLogin no) 조치 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
 
-        - name: "LOG basis"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_basis.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_BASIS,
-                  "title": LOG_TITLE_BASIS,
-                  "basis": (
-                    "SSH: PermitRootLogin no " ~
-                    (((r_sshd_config.changed | default(false)) or (r_sshd_config_add.changed | default(false))) | ternary("적용됨", "이미 적용됨")) ~
-                    ", 서비스 재시작 " ~ ((r_sshd_restart.changed | default(false)) | ternary("완료", "불필요")) ~
-                    " / Telnet: 설정 " ~
-                    (((r_securetty.changed | default(false)) or (r_pam.changed | default(false))) | ternary("강화됨", "이미 양호함"))
-                  ),
-                  "status": (
-                    ((r_sshd_config.changed | default(false)) or 
-                     (r_sshd_config_add.changed | default(false)) or 
-                     (r_securetty.changed | default(false)) or 
-                     (r_pam.changed | default(false))) 
-                    | ternary("취약(조치완료)", "양호")
-                  )
-                } | to_json
-              }}
-          changed_when: false
+        - name: "Log U_01_2 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_01_2",
+                "section": "[조치 결과]",
+                "title": "[U_01_2] SSH Root 접속 제한 설정 성공",
+                "cmd": "sshd_config 수정 및 서비스 재시작 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_01_2 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_01_2",
+                  "status": 0,
+                  "description": "조치 실패: SSH 설정 변경 또는 재시작 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_01_2 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_01_2",
+                "section": "[조치 결과]",
+                "title": "[U_01_2] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - sshd_config 문법 에러 등 확인 필요"
+              }

@@ -1,11 +1,23 @@
----
-- name: "U-11 | Restrict System Account Shells"
+- name: "[U_11] Remediate System Account Shells"
   hosts: all
   become: yes
-  gather_facts: yes
-
   vars:
-    FLAG_ID: "U-11"
+    # 1. Flag List (Control Node에서 주입됨)
+    flag_list: []
+    flag_id_main: "U_11"
+    category: "account"
+
+    # 2. 타임스탬프 정의
+    ts_stderr: "{{ ansible_date_time.iso8601 }}"
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}"
+
+    # 3. 로그 파일 경로 정의
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
+    
+    # 파일명 규칙
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.json"
 
     # 점검 대상 계정 목록 (가이드 기준)
     target_accounts:
@@ -22,104 +34,120 @@
       - games
       - gopher
 
-    # OS별 nologin 쉘 경로 설정
-    nologin_shell: "{{ '/sbin/nologin' if ansible_os_family == 'RedHat' else '/usr/sbin/nologin' }}"
-
-    # 로그 관련 변수
-    LOG_SECTION_STEP: "[조치 내용]"
-    LOG_SECTION_BASIS: "[조치 결과]"
-    LOG_TITLE_BASIS: "조치 근거"
-    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
-
   tasks:
-    # ---------------------------------------------------------
-    # (공통) 변수 초기화
-    # ---------------------------------------------------------
-    - name: "U-11 | init defaults"
-      ansible.builtin.set_fact:
-        modified_accounts: []
-        existing_accounts: []
-      changed_when: false
-
     # =========================================================
-    # 1. 진단 및 대상 식별: 시스템에 실제 존재하는 계정 확인
-    #    (존재하지 않는 계정을 수정하려고 하면 에러 발생하므로 필터링)
+    # 1. [U_11_1] 불필요한 계정 쉘 제한 (/bin/false or nologin)
     # =========================================================
-    - name: "U-11 | Check if target accounts exist"
-      ansible.builtin.shell: "getent passwd {{ item }} | cut -d: -f1"
-      loop: "{{ target_accounts }}"
-      register: r_check_users
-      changed_when: false
-      failed_when: false # 계정이 없어도 에러 아님
-
-    - name: "U-11 | Filter existing accounts"
-      ansible.builtin.set_fact:
-        existing_accounts: "{{ r_check_users.results | selectattr('rc', 'equalto', 0) | map(attribute='stdout') | list }}"
-      changed_when: false
-
-    # =========================================================
-    # 2. 조치: 쉘 변경 (nologin)
-    # =========================================================
-    - name: "U-11 | Change shell to nologin for existing accounts"
-      ansible.builtin.user:
-        name: "{{ item }}"
-        shell: "{{ nologin_shell }}"
-      loop: "{{ existing_accounts }}"
-      register: r_usermod
-      when: existing_accounts | length > 0
-
-    # =========================================================
-    # 3. 결과 로깅
-    # =========================================================
-    - name: "U-11 | 조치 내용 상세 LOG"
+    - name: "[U_11_1] Block for System Account Shell Remediation"
+      when: "'U_11_1' in flag_list"
       block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_step
-          changed_when: false
+        # -----------------------------------------------------
+        # 실제 조치 태스크 시작
+        # -----------------------------------------------------
 
-        # 실제로 변경된 계정 목록 추출
-        - name: "Extract modified users"
+        # 1-1. OS별 Nologin 쉘 경로 설정
+        - name: "[U_11_1] Set nologin shell path based on OS"
           set_fact:
-            changed_list: "{{ r_usermod.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list }}"
-            
-        - name: "LOG step"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_step.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_STEP,
-                  "title": "시스템 계정 Shell 로그인 차단 설정",
-                  "cmd": "usermod -s " ~ nologin_shell ~ " [account]",
-                  "result": "targets=" ~ (existing_accounts | join(", ") if (existing_accounts | length > 0) else "None") ~
-                            ", modified=" ~ (changed_list | join(", ") if (changed_list | length > 0) else "None")
-                } | to_json
-              }}
-          changed_when: false
+            nologin_shell: "{{ '/sbin/nologin' if ansible_os_family == 'RedHat' else '/usr/sbin/nologin' }}"
 
-    - name: "U-11 | 최종 결과 근거 LOG"
-      block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_basis
-          changed_when: false
+        # 1-2. 현재 시스템에 존재하는 사용자 목록 가져오기
+        - name: "[U_11_1] Get all user info"
+          getent:
+            database: passwd
 
-        - name: "LOG basis"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_basis.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_BASIS,
-                  "title": LOG_TITLE_BASIS,
-                  "basis": (
-                    "발견된 시스템 계정(" ~ (existing_accounts | length | string) ~ "개) 쉘 점검 완료. " ~
-                    ((changed_list | length > 0) | ternary((changed_list | join(", ")) ~ " 계정의 쉘을 " ~ nologin_shell ~ "로 변경함", "모든 대상 계정이 이미 안전한 쉘을 사용 중임"))
-                  ),
-                  "status": ((changed_list | length > 0) | ternary("취약(조치완료)", "양호"))
-                } | to_json
-              }}
-          changed_when: false
+        # 1-3. 대상 계정 중 실제 존재하는 계정만 필터링하여 쉘 변경
+        # 주의: user 모듈은 계정이 없으면 생성해버리므로, 반드시 존재 여부 체크 후 실행해야 함
+        - name: "[U_11_1] Change shell for existing system accounts"
+          user:
+            name: "{{ item }}"
+            shell: "{{ nologin_shell }}"
+          loop: "{{ target_accounts }}"
+          when: item in ansible_facts.getent_passwd
+          register: r_shell_change
+
+        # -----------------------------------------------------
+        # 실제 조치 태스크 끝
+        # -----------------------------------------------------
+
+        # [성공 로그: Status 2]
+        - name: "Log U_11_1 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_11_1",
+                  "status": 2,
+                  "description": "불필요한 시스템 계정의 쉘을 {{ nologin_shell }}로 변경 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_11_1 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_11_1",
+                "section": "[조치 결과]",
+                "title": "[U_11_1] 시스템 계정 쉘 제한 설정 성공",
+                "cmd": "존재하는 시스템 계정에 대해 {{ nologin_shell }} 적용 완료",
+                "result": "조치 성공 (status: 2)"
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_11_1 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_11_1",
+                  "status": 0,
+                  "description": "조치 실패: 계정 쉘 변경 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_11_1 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_11_1",
+                "section": "[조치 결과]",
+                "title": "[U_11_1] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - 계정 잠금 권한 문제 또는 파일 시스템 오류 확인 필요"
+              }

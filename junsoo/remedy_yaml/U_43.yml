@@ -1,86 +1,137 @@
----
-- name: "U-43 | Deactivate NIS Services (Logs-Only JSONL)"
+- name: "[U_43] Disable Unnecessary NIS Services"
   hosts: all
   become: yes
-  gather_facts: no
-
   vars:
-    FLAG_ID: "U-43"
+    # 1. Flag List (Control Node에서 주입됨)
+    flag_list: []
+    flag_id_main: "U_43"
+    category: "service"
+
+    # 2. 타임스탬프 정의
+    ts_stderr: "{{ ansible_date_time.iso8601 }}"
+    ts_stdout: "{{ ansible_date_time.date | replace('-','_') }} / {{ ansible_date_time.time }}"
+
+    # 3. 로그 파일 경로 정의 (Control Node의 경로)
+    log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
+    json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
     
-    # 점검 대상 NIS 서비스 목록
+    # 파일명 규칙
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.json"
+
+    # 차단 대상 NIS 서비스 목록 (가이드 및 진단 스크립트 기준)
     nis_services:
       - ypserv
       - ypbind
       - ypxfrd
       - rpc.yppasswdd
       - rpc.ypupdated
-
-    LOG_SECTION_STEP: "[조치 내용]"
-    LOG_SECTION_BASIS: "[조치 결과]"
-    LOG_TITLE_BASIS: "조치 근거"
-    LOG_TS_CMD: "date +%Y-%m-%dT%H:%M:%S%z"
+      - yppasswdd
+      - ypupdated
+      - nis-domainname
 
   tasks:
-    # ---------------------------------------------------------
-    # 0. 초기화
-    # ---------------------------------------------------------
-    - name: "U-43 | init defaults"
-      ansible.builtin.set_fact:
-        r_nis_results: []
-      changed_when: false
-
     # =========================================================
-    # 1. [Systemd] NIS 서비스 중지 및 비활성화
-    # - 서비스가 설치되지 않은 경우(failed) 무시하고 진행
+    # 1. [U_43_1] NIS 서비스 중지 및 비활성화 (통합 조치)
     # =========================================================
-    - name: "U-43 | [U_43_1] NIS 서비스 중지 및 비활성화"
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        state: stopped
-        enabled: no
-      loop: "{{ nis_services }}"
-      register: r_nis_results
-      ignore_errors: yes 
-      # Rocky 9 등 최신 OS에는 NIS 패키지가 없어 에러가 날 수 있음 -> 무시 (양호 간주)
-
-    # =========================================================
-    # 2. 결과 집계 및 로그 기록
-    # =========================================================
-    - name: "U-43 | [U_43_1] 조치 결과 집계 및 LOG"
+    - name: "[U_43_1] Block for NIS Services Remediation"
+      when: "'U_43_1' in flag_list"
       block:
-        - name: "ts"
-          ansible.builtin.command: "{{ LOG_TS_CMD }}"
-          register: ts_43
-          changed_when: false
+        # -----------------------------------------------------
+        # 실제 조치 태스크 시작
+        # -----------------------------------------------------
+        - name: "[U_43_1] Stop and Disable NIS services"
+          service:
+            name: "{{ item }}"
+            state: stopped
+            enabled: no
+          loop: "{{ nis_services }}"
+          ignore_errors: yes
+          register: r_nis_stop
 
-        - name: "변경된(조치된) 서비스 목록 추출"
-          ansible.builtin.set_fact:
-            # 결과 중 'failed'가 아니고(설치됨), 'changed'가 true인(조치됨) 항목만 추출
-            changed_nis: >-
-              {{
-                r_nis_results.results 
-                | selectattr('failed', 'equalto', false) 
-                | selectattr('changed', 'equalto', true) 
-                | map(attribute='item') 
-                | list 
-              }}
+        # -----------------------------------------------------
+        # 실제 조치 태스크 끝
+        # -----------------------------------------------------
 
-        - name: "LOG basis"
-          ansible.builtin.debug:
-            msg: >-
-              {{
-                {
-                  "ts": (ts_43.stdout | default("")),
-                  "flag_id": FLAG_ID,
-                  "section": LOG_SECTION_BASIS,
-                  "title": LOG_TITLE_BASIS,
-                  "basis": (
-                    (changed_nis | length > 0) | ternary(
-                       "[U-43] 조치된 NIS 서비스: " ~ (changed_nis | join(", ")),
-                       "[U-43] 활성화된 NIS 서비스가 발견되지 않음(서비스 미설치 또는 이미 비활성)"
-                    )
-                  ),
-                  "status": ((changed_nis | length > 0) | ternary("취약", "양호"))
-                } | to_json
-              }}
-          changed_when: false
+        # [성공 로그: Status 2]
+        - name: "Log U_43_1 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_43_1",
+                  "status": 2,
+                  "description": "NIS 관련 서비스(ypserv, ypbind 등) 비활성화 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_43_1 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_43_1",
+                "section": "[조치 결과]",
+                "title": "[U_43_1] NIS 서비스 중지 및 비활성화 성공",
+                "cmd": "systemctl stop/disable ypserv, ypbind, ypxfrd 등",
+                "result": "조치 성공 (status: 2)"
+              }
+
+      # [실패 처리: Status 0]
+      rescue:
+        - name: "Log U_43_1 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_43_1",
+                  "status": 0,
+                  "description": "조치 실패: NIS 서비스 제어 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_43_1 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_43_1",
+                "section": "[조치 결과]",
+                "title": "[U_43_1] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0) - 서비스명 확인 또는 권한 문제 가능성"
+              }
