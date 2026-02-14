@@ -15,38 +15,39 @@
     log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
     
-    # 파일명 규칙
-    my_log_file: "{{ log_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.log"
-    my_json_file: "{{ json_dir }}/{{ ansible_hostname | replace('-scan', '')}}-remediate_{{ flag_id_main }}.json"
+    # 파일명 규칙 (참고한 U_37과 동일하게 -scan 제거 로직 적용)
+    my_log_file: "{{ log_dir }}/{{ ansible_hostname | replace('-scan', '') }}-remediate_{{ flag_id_main }}.log"
+    my_json_file: "{{ json_dir }}/{{ ansible_hostname | replace('-scan', '') }}-remediate_{{ flag_id_main }}.json"
 
   tasks:
-    # =========================================================
-    # 1. [U_39] NFS 서비스 중지 및 비활성화 (통합 조치)
-    # =========================================================
-    - name: "[U_39] Disable NFS Services"
-      # 진단 플래그 중 하나라도 켜져 있으면 조치 실행
-      when: "'U_39_1' in flag_list or 'U_39_2' in flag_list or 'U_39_3' in flag_list"
-      block:
-        # 1-1. 서비스 중지 (OS별 서비스명 분기)
-        - name: "[U_39] Define NFS services list"
-          set_fact:
-            nfs_services: >-
-              {{
-                ['nfs-server', 'rpcbind', 'nfs-mountd', 'nfs-idmapd'] if ansible_os_family == 'RedHat'
-                else ['nfs-kernel-server', 'rpcbind', 'nfs-common']
-              }}
+    # ---------------------------------------------------------
+    # 공통: OS별 NFS 서비스명 정의
+    # ---------------------------------------------------------
+    - name: "[U_39] Define NFS services list based on OS"
+      set_fact:
+        nfs_services: >-
+          {{
+            ['nfs-server', 'rpcbind', 'nfs-mountd', 'nfs-idmapd', 'nfs-lock', 'nfs-idmap'] if ansible_os_family == 'RedHat'
+            else ['nfs-kernel-server', 'rpcbind', 'nfs-common']
+          }}
 
-        - name: "[U_39] Stop and Disable NFS services"
+    # =========================================================
+    # 1. [U_39_1] 서비스(Systemd) 활성화 상태에 대한 조치
+    # =========================================================
+    - name: "[U_39_1] Disable NFS Services (Systemd Active)"
+      when: "'U_39_1' in flag_list"
+      block:
+        - name: "[U_39_1] Stop and Disable NFS services"
           service:
             name: "{{ item }}"
             state: stopped
             enabled: no
           loop: "{{ nfs_services }}"
           ignore_errors: yes
-          register: r_nfs_stop
+          register: r_nfs_39_1
 
-        # 1-2. [Control Node] 로그 기록
-        - name: "Log U_39 Success (Log File)"
+        # 로그 기록
+        - name: "Log U_39_1 Success (Log File)"
           delegate_to: localhost
           become: false
           ansible.builtin.lineinfile:
@@ -56,15 +57,14 @@
             line: >-
               {
                 "ts": "{{ ts_stderr }}",
-                "flag_id": "U_39",
+                "flag_id": "U_39_1",
                 "section": "[조치 결과]",
-                "title": "[U_39] NFS 서비스 중지 및 비활성화 성공",
+                "title": "[U_39_1] NFS 서비스(Active) 중지 성공",
                 "cmd": "systemctl stop/disable {{ nfs_services | join(', ') }}",
                 "result": "조치 성공 (status: 2)"
               }
 
-        # 1-3. [Control Node] JSON 기록
-        - name: "Log U_39 Success (JSON)"
+        - name: "Log U_39_1 Success (JSON)"
           delegate_to: localhost
           become: false
           ansible.builtin.lineinfile:
@@ -79,17 +79,16 @@
                   "user": "{{ ansible_user_id }}"
                 },
                 "result": {
-                  "flag_id": "U_39",
+                  "flag_id": "U_39_1",
                   "status": 2,
-                  "description": "NFS 관련 서비스(nfs-server/rpcbind) 비활성화 완료",
+                  "description": "NFS 서비스(Systemd Active) 비활성화 완료",
                   "category": "{{ category }}",
                   "timestamp": "{{ ts_stdout }}"
                 }
               }
 
-      # [실패 처리: Status 0]
       rescue:
-        - name: "Log U_39 Failure (JSON)"
+        - name: "Log U_39_1 Failure (JSON)"
           delegate_to: localhost
           become: false
           ansible.builtin.lineinfile:
@@ -104,15 +103,15 @@
                   "user": "{{ ansible_user_id }}"
                 },
                 "result": {
-                  "flag_id": "U_39",
+                  "flag_id": "U_39_1",
                   "status": 0,
-                  "description": "조치 실패: NFS 서비스 중지 중 에러 발생",
+                  "description": "조치 실패: NFS 서비스 중지(U_39_1) 중 에러 발생",
                   "category": "{{ category }}",
                   "timestamp": "{{ ts_stdout }}"
                 }
               }
 
-        - name: "Log U_39 Failure (Log File)"
+        - name: "Log U_39_1 Failure (Log File)"
           delegate_to: localhost
           become: false
           ansible.builtin.lineinfile:
@@ -122,9 +121,205 @@
             line: >-
               {
                 "ts": "{{ ts_stderr }}",
-                "flag_id": "U_39",
+                "flag_id": "U_39_1",
                 "section": "[조치 결과]",
-                "title": "[U_39] 조치 실패",
+                "title": "[U_39_1] 조치 실패",
                 "cmd": "Ansible Task Failed",
-                "result": "조치 실패 (status: 0) - systemctl 권한 또는 서비스명 확인 필요"
+                "result": "조치 실패 (status: 0)"
+              }
+
+
+    # =========================================================
+    # 2. [U_39_2] 프로세스 및 포트(Listen) 상태에 대한 조치
+    # =========================================================
+    - name: "[U_39_2] Disable NFS Services (Port/Process Listen)"
+      when: "'U_39_2' in flag_list"
+      block:
+        # 서비스 중지가 곧 포트 닫기이므로 동일한 조치 수행
+        - name: "[U_39_2] Stop and Disable NFS services to close ports"
+          service:
+            name: "{{ item }}"
+            state: stopped
+            enabled: no
+          loop: "{{ nfs_services }}"
+          ignore_errors: yes
+
+        # 로그 기록
+        - name: "Log U_39_2 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_39_2",
+                "section": "[조치 결과]",
+                "title": "[U_39_2] NFS 포트/프로세스 관련 서비스 중지 성공",
+                "cmd": "systemctl stop/disable {{ nfs_services | join(', ') }}",
+                "result": "조치 성공 (status: 2)"
+              }
+
+        - name: "Log U_39_2 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_39_2",
+                  "status": 2,
+                  "description": "NFS 관련 포트/프로세스 비활성화 조치 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      rescue:
+        - name: "Log U_39_2 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_39_2",
+                  "status": 0,
+                  "description": "조치 실패: NFS 서비스 중지(U_39_2) 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_39_2 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_39_2",
+                "section": "[조치 결과]",
+                "title": "[U_39_2] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
+              }
+
+
+    # =========================================================
+    # 3. [U_39_3] 패키지 설치 및 설정(/etc/exports) 존재에 대한 조치
+    # =========================================================
+    - name: "[U_39_3] Disable NFS Services (Package/Config Exists)"
+      when: "'U_39_3' in flag_list"
+      block:
+        # 설정이나 패키지가 존재할 경우에도 확실히 서비스를 내리는 조치
+        - name: "[U_39_3] Stop and Disable NFS services due to config/package"
+          service:
+            name: "{{ item }}"
+            state: stopped
+            enabled: no
+          loop: "{{ nfs_services }}"
+          ignore_errors: yes
+
+        # 로그 기록
+        - name: "Log U_39_3 Success (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_39_3",
+                "section": "[조치 결과]",
+                "title": "[U_39_3] NFS 설정/패키지 존재에 따른 서비스 비활성화 성공",
+                "cmd": "systemctl stop/disable {{ nfs_services | join(', ') }}",
+                "result": "조치 성공 (status: 2)"
+              }
+
+        - name: "Log U_39_3 Success (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_39_3",
+                  "status": 2,
+                  "description": "NFS 설정/패키지 존재 확인 - 서비스 영구 비활성화 조치 완료",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+      rescue:
+        - name: "Log U_39_3 Failure (JSON)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_json_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "meta": {
+                  "hostname": "{{ ansible_hostname }}",
+                  "ip": "{{ ansible_default_ipv4.address }}",
+                  "user": "{{ ansible_user_id }}"
+                },
+                "result": {
+                  "flag_id": "U_39_3",
+                  "status": 0,
+                  "description": "조치 실패: NFS 서비스 중지(U_39_3) 중 에러 발생",
+                  "category": "{{ category }}",
+                  "timestamp": "{{ ts_stdout }}"
+                }
+              }
+
+        - name: "Log U_39_3 Failure (Log File)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.lineinfile:
+            path: "{{ my_log_file }}"
+            create: yes
+            mode: '0644'
+            line: >-
+              {
+                "ts": "{{ ts_stderr }}",
+                "flag_id": "U_39_3",
+                "section": "[조치 결과]",
+                "title": "[U_39_3] 조치 실패",
+                "cmd": "Ansible Task Failed",
+                "result": "조치 실패 (status: 0)"
               }
