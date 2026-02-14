@@ -43,13 +43,14 @@
     TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
 
     # ==============================
-    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리 + scan 제거)
     # ==============================
     log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
 
-    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
-    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+    FILE_HOST: "{{ inventory_hostname | regex_replace('(-scan)$', '') }}"
+    my_log_file: "{{ log_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.json"
 
   tasks:
     # ---------------------------------------------------------

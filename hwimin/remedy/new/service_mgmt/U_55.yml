@@ -1,3 +1,4 @@
+---
 - name: "U_55 | Remediate FTP Default Account Shell Restriction (Controlled Env, Logs+JSON, Host-Split, UTF8-safe)"
   hosts: all
   become: yes
@@ -21,13 +22,14 @@
     TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
 
     # ==============================
-    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리 + scan 제거)
     # ==============================
     log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
 
-    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
-    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+    FILE_HOST: "{{ inventory_hostname | regex_replace('(-scan)$', '') }}"
+    my_log_file: "{{ log_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.json"
 
   tasks:
     # ---------------------------------------------------------
@@ -36,8 +38,8 @@
     - name: "U_55 | init defaults"
       ansible.builtin.set_fact:
         r_getent: {}
-        current_shell: ""
         r_usermod: {}
+        current_shell: ""
         u551_status: 0
         u551_desc: ""
         u551_result: ""
@@ -80,12 +82,15 @@
           changed_when: false
           failed_when: false
 
-        - name: "U_55_1 | parse current shell"
+        # ✅ 여기서 current_shell이 bool로 떨어지지 않도록 무조건 string 강제
+        - name: "U_55_1 | parse current shell (string-safe)"
           ansible.builtin.set_fact:
             current_shell: >-
               {{
-                ((r_getent.rc | default(1) | int) == 0)
-                | ternary((r_getent.stdout.split(':') | last | default('')), '')
+                (
+                  ((r_getent.rc | default(1) | int) == 0)
+                  | ternary((r_getent.stdout | default('')), '')
+                ).split(':') | last | default('') | string
               }}
           changed_when: false
 
@@ -96,10 +101,10 @@
           failed_when: false
           when:
             - (r_getent.rc | default(1) | int) == 0
-            - current_shell | length > 0
-            - current_shell not in allowed_shells
+            - (current_shell | default('') | string | length) > 0
+            - (current_shell | string) not in allowed_shells
 
-        # ---- status/description/result/cmd 계산 (문법 안정형: when 분기) ----
+        # ---- status/description/result/cmd 계산 ----
         - name: "U_55_1 | compute status/description/result (stable)"
           block:
             - name: "U_55_1 | compute | init"
@@ -124,7 +129,7 @@
               changed_when: false
               when:
                 - (r_getent.rc | default(1) | int) == 0
-                - current_shell in allowed_shells
+                - (current_shell | string) in allowed_shells
 
             - name: "U_55_1 | compute | usermod success"
               ansible.builtin.set_fact:
@@ -133,8 +138,8 @@
               changed_when: false
               when:
                 - (r_getent.rc | default(1) | int) == 0
-                - current_shell | length > 0
-                - current_shell not in allowed_shells
+                - (current_shell | default('') | string | length) > 0
+                - (current_shell | string) not in allowed_shells
                 - (r_usermod.rc | default(1) | int) == 0
 
             - name: "U_55_1 | compute | usermod failed"
@@ -144,8 +149,8 @@
               changed_when: false
               when:
                 - (r_getent.rc | default(1) | int) == 0
-                - current_shell | length > 0
-                - current_shell not in allowed_shells
+                - (current_shell | default('') | string | length) > 0
+                - (current_shell | string) not in allowed_shells
                 - (r_usermod.rc | default(1) | int) != 0
 
             - name: "U_55_1 | compute | finalize result"
@@ -157,7 +162,7 @@
         - name: "U_55_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe, host-split)"
           delegate_to: localhost
           become: false
-          ansible.builtin.shell: >
+          ansible.builtin.shell: |
             printf '%s\n' '{{ {
               "ts": (ts_551_e.stderr_ts | default("")),
               "flag_id": "U_55_1",
@@ -165,8 +170,8 @@
               "title": "[U_55_1] ftp 계정 로그인 쉘 제한(/bin/false 적용)",
               "cmd": u551_cmd,
               "result": u551_result
-            } | to_json }}'
-            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_log_file }}' 1>&2
           vars:
             ts_551_e:
@@ -177,13 +182,9 @@
         - name: "U_55_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe, host-split)"
           delegate_to: localhost
           become: false
-          ansible.builtin.shell: >
+          ansible.builtin.shell: |
             printf '%s\n' '{{ {
-              "meta": {
-                "hostname": META_HOSTNAME,
-                "ip": META_IP,
-                "user": META_USER
-              },
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
               "result": {
                 "flag_id": "U_55_1",
                 "status": (u551_status | int),
@@ -191,8 +192,8 @@
                 "category": "service",
                 "timestamp": (ts_551_o.stdout_ts | default(""))
               }
-            } | to_json }}'
-            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_json_file }}'
           vars:
             ts_551_o:

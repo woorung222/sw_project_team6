@@ -14,13 +14,14 @@
     TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
 
     # ==============================
-    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리)
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리 + scan 제거)
     # ==============================
     log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
 
-    my_log_file: "{{ log_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.log"
-    my_json_file: "{{ json_dir }}/{{ inventory_hostname }}-remediate_{{ FLAG_ID }}.json"
+    FILE_HOST: "{{ inventory_hostname | regex_replace('(-scan)$', '') }}"
+    my_log_file: "{{ log_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.log"
+    my_json_file: "{{ json_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.json"
 
   tasks:
     # ---------------------------------------------------------
@@ -101,56 +102,53 @@
           failed_when: false
           when: (r_snmp_enabled.stdout | default('')) == "enabled"
 
-        - name: "U_58_1 | compute status/description/cmd (stable)"
-          block:
-            - name: "U_58_1 | compute | init"
-              ansible.builtin.set_fact:
-                u581_cmd: "systemctl is-active {{ snmp_service }}; systemctl is-enabled {{ snmp_service }}; (if active) systemctl stop {{ snmp_service }}; (if enabled) systemctl disable {{ snmp_service }}"
-                u581_status: 0
-                u581_desc: ""
-              changed_when: false
+        - name: "U_58_1 | compute | init"
+          ansible.builtin.set_fact:
+            u581_cmd: "systemctl is-active {{ snmp_service }}; systemctl is-enabled {{ snmp_service }}; (if active) systemctl stop {{ snmp_service }}; (if enabled) systemctl disable {{ snmp_service }}"
+            u581_status: 0
+            u581_desc: ""
+          changed_when: false
 
-            - name: "U_58_1 | compute | service missing or query failed"
-              ansible.builtin.set_fact:
-                u581_status: 0
-                u581_desc: "snmpd 서비스가 존재하지 않거나 상태 조회가 불가하여 조치하지 않았습니다"
-              changed_when: false
-              when:
-                - (r_snmp_active.rc | default(0) | int) != 0
-                - (r_snmp_enabled.rc | default(0) | int) != 0
+        - name: "U_58_1 | compute | service missing or query failed"
+          ansible.builtin.set_fact:
+            u581_status: 0
+            u581_desc: "snmpd 서비스가 존재하지 않거나 상태 조회가 불가하여 조치하지 않았습니다"
+          changed_when: false
+          when:
+            - (r_snmp_active.rc | default(0) | int) != 0
+            - (r_snmp_enabled.rc | default(0) | int) != 0
 
-            - name: "U_58_1 | compute | already inactive/disabled"
-              ansible.builtin.set_fact:
-                u581_status: 2
-                u581_desc: "snmpd 서비스가 이미 비활성/중지 상태여서 조치가 필요 없습니다"
-              changed_when: false
-              when:
-                - not ((r_snmp_active.rc | default(0) | int) != 0 and (r_snmp_enabled.rc | default(0) | int) != 0)
-                - (r_snmp_active.stdout | default('')) != "active"
-                - (r_snmp_enabled.stdout | default('')) != "enabled"
+        - name: "U_58_1 | compute | already inactive/disabled"
+          ansible.builtin.set_fact:
+            u581_status: 2
+            u581_desc: "snmpd 서비스가 이미 비활성/중지 상태여서 조치가 필요 없습니다"
+          changed_when: false
+          when:
+            - not ((r_snmp_active.rc | default(0) | int) != 0 and (r_snmp_enabled.rc | default(0) | int) != 0)
+            - (r_snmp_active.stdout | default('')) != "active"
+            - (r_snmp_enabled.stdout | default('')) != "enabled"
 
-            - name: "U_58_1 | compute | attempted stop/disable"
-              ansible.builtin.set_fact:
-                u581_status: 2
-                u581_desc: >-
-                  {% set stop_failed = (r_snmp_stop.failed | default(false)) | bool %}
-                  {% set dis_failed  = (r_snmp_disable.failed | default(false)) | bool %}
-                  {% if stop_failed or dis_failed %}
-                  snmpd 서비스가 활성/사용 상태여서 중지/비활성화를 시도했으나 일부 작업이 실패했습니다(stop_failed={{ stop_failed }}, disable_failed={{ dis_failed }})
-                  {% else %}
-                  snmpd 서비스가 활성 상태여서 중지/비활성화를 적용했습니다
-                  {% endif %}
-              changed_when: false
-              when:
-                - not ((r_snmp_active.rc | default(0) | int) != 0 and (r_snmp_enabled.rc | default(0) | int) != 0)
-                - ((r_snmp_active.stdout | default('')) == "active") or ((r_snmp_enabled.stdout | default('')) == "enabled")
+        - name: "U_58_1 | compute | attempted stop/disable"
+          ansible.builtin.set_fact:
+            u581_status: 2
+            u581_desc: >-
+              {% set stop_failed = (r_snmp_stop.failed | default(false)) | bool %}
+              {% set dis_failed  = (r_snmp_disable.failed | default(false)) | bool %}
+              {% if stop_failed or dis_failed %}
+              snmpd 서비스가 활성/사용 상태여서 중지/비활성화를 시도했으나 일부 작업이 실패했습니다(stop_failed={{ stop_failed }}, disable_failed={{ dis_failed }})
+              {% else %}
+              snmpd 서비스가 활성/사용 상태여서 중지/비활성화를 적용했습니다
+              {% endif %}
+          changed_when: false
+          when:
+            - not ((r_snmp_active.rc | default(0) | int) != 0 and (r_snmp_enabled.rc | default(0) | int) != 0)
+            - ((r_snmp_active.stdout | default('')) == "active") or ((r_snmp_enabled.stdout | default('')) == "enabled")
 
-            - name: "U_58_1 | compute | result string"
-              ansible.builtin.set_fact:
-                u581_result: "{{ ((u581_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
-              changed_when: false
+        - name: "U_58_1 | compute | finalize result"
+          ansible.builtin.set_fact:
+            u581_result: "{{ ((u581_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
 
-        # ---- stderr(log) : UTF8-safe + section 실제 조치내용 ----
         - name: "U_58_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
           delegate_to: localhost
           become: false
@@ -170,7 +168,6 @@
               stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
           changed_when: false
 
-        # ---- stdout(json) : UTF8-safe ----
         - name: "U_58_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
           delegate_to: localhost
           become: false
