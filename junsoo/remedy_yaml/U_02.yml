@@ -3,7 +3,6 @@
   become: yes
   vars:
     # 1. Flag List (Control Node에서 주입됨)
-    # 진단 스크립트는 'U_02_1' 하나만 던지지만, 조치 시 OS별로 로그 ID를 분기합니다.
     flag_list: []
     
     flag_id_main: "U_02"
@@ -160,9 +159,9 @@
 
 
     # =========================================================
-    # 2. [Debian 계열] Ubuntu 등 -> Log ID: U_02_2
+    # 2. [Debian 계열] Ubuntu 등 -> Log ID: U_02_1
     # =========================================================
-    - name: "[U_02_2] Debian Password Policy Remediation"
+    - name: "[U_02_1] Debian Password Policy Remediation"
       when: 
         - "'U_02_1' in flag_list"
         - ansible_os_family == 'Debian'
@@ -205,8 +204,8 @@
             line: 'enforce_for_root'
             state: present
 
-        # [성공 로그: U_02_2]
-        - name: "Log U_02_2 Success (JSON)"
+        # [성공 로그: U_02_1]
+        - name: "Log U_02_1 Success (JSON)"
           delegate_to: localhost
           become: false
           ansible.builtin.lineinfile:
@@ -221,7 +220,7 @@
                   "user": "{{ ansible_user_id }}"
                 },
                 "result": {
-                  "flag_id": "U_02_2",
+                  "flag_id": "U_02_1",
                   "status": 2,
                   "description": "[Debian] 패스워드 정책(복잡성, 기간) 설정 완료",
                   "category": "{{ category }}",
@@ -229,7 +228,7 @@
                 }
               }
 
-        - name: "Log U_02_2 Success (Log File)"
+        - name: "Log U_02_1 Success (Log File)"
           delegate_to: localhost
           become: false
           ansible.builtin.lineinfile:
@@ -239,16 +238,16 @@
             line: >-
               {
                 "ts": "{{ ts_stderr }}",
-                "flag_id": "U_02_2",
+                "flag_id": "U_02_1",
                 "section": "[조치 결과]",
                 "title": "[Debian] 패스워드 정책 적용 성공",
                 "cmd": "login.defs, pwquality.conf 수정 완료",
                 "result": "조치 성공 (status: 2)"
               }
 
-      # [실패 처리: U_02_2]
+      # [실패 처리: U_02_1]
       rescue:
-        - name: "Log U_02_2 Failure (JSON)"
+        - name: "Log U_02_1 Failure (JSON)"
           delegate_to: localhost
           become: false
           ansible.builtin.lineinfile:
@@ -263,7 +262,7 @@
                   "user": "{{ ansible_user_id }}"
                 },
                 "result": {
-                  "flag_id": "U_02_2",
+                  "flag_id": "U_02_1",
                   "status": 0,
                   "description": "[Debian] 조치 실패: 패스워드 설정 파일 수정 중 에러",
                   "category": "{{ category }}",
@@ -271,7 +270,7 @@
                 }
               }
 
-        - name: "Log U_02_2 Failure (Log File)"
+        - name: "Log U_02_1 Failure (Log File)"
           delegate_to: localhost
           become: false
           ansible.builtin.lineinfile:
@@ -281,7 +280,7 @@
             line: >-
               {
                 "ts": "{{ ts_stderr }}",
-                "flag_id": "U_02_2",
+                "flag_id": "U_02_1",
                 "section": "[조치 결과]",
                 "title": "[Debian] 조치 실패",
                 "cmd": "Ansible Task Failed",

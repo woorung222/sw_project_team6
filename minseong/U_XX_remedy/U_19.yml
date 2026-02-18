@@ -29,14 +29,14 @@
      delegate_to: localhost          # [필수] Controller에 저장
      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
      ansible.builtin.lineinfile:
-       path: "{{ my_log_file }}_U_19"     # [필수] vars에 선언한 로그 파일 경로
+       path: "{{ my_log_file }}_U_19.log"     # [필수] vars에 선언한 로그 파일 경로
        create: yes                   # [옵션] 파일 없으면 생성
        mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
        line: >-
          {{
           {
            "ts": ts_stderr,
-           "flag_id": "U_19.log",
+           "flag_id": "U_19_1",
            "section": "[조치 내용]",
            "title": "[U_19_1] (/etc/hosts 소유자 및 권한 변경)",
            "cmd": " chown root /etc/hosts, chmod 644 /etc/hosts ",
