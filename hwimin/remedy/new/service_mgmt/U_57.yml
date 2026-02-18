@@ -1,5 +1,5 @@
 ---
-- name: "U_57 | Remediate FTP Root Login Restriction (Controlled Env, Logs+JSON to /tmp, Stream-Split)"
+- name: "U_57 | Remediate FTP Root Login Restriction (Controlled Env, Controller-Only Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
   hosts: all
   become: yes
   gather_facts: no
@@ -7,32 +7,41 @@
   vars:
     FLAG_ID: "U_57"
 
+    # 후보 파일 경로
     ftpusers_candidates:
       - "/etc/ftpusers"
       - "/etc/ftpd/ftpusers"
 
     vsftpd_conf_candidates:
       - "/etc/vsftpd/vsftpd.conf"
+      - "/etc/vsftpd.conf"
+
     vsftpd_ftpusers_candidates:
       - "/etc/vsftpd/ftpusers"
+      - "/etc/vsftpd.ftpusers"
+
     vsftpd_user_list_candidates:
       - "/etc/vsftpd/user_list"
+      - "/etc/vsftpd.user_list"
 
+    # ProFTPD
+    proftpd_ftpusers_fixed: "/etc/ftpd/ftpusers"
     proftpd_conf_candidates:
       - "/etc/proftpd/proftpd.conf"
       - "/etc/proftpd.conf"
 
+    # 공통 권한(팀 통일)
     AUTO_OWNER: "root"
     AUTO_GROUP: "root"
     AUTO_MODE: "0640"
 
     deny_user: "root"
 
-    LOG_SECTION_STEP: "[조치 내용]"
-
+    # timestamps (controller side)
     TS_STDERR_CMD: "date -u +%Y-%m-%dT%H:%M:%SZ"
     TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
 
+    # log/json path (controller side)
     log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
 
@@ -40,7 +49,13 @@
     my_log_file: "{{ log_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.log"
     my_json_file: "{{ json_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.json"
 
+    # service name (환경별 상이 가능 → 실패 시 failed_when:false)
+    svc_proftpd: "proftpd"
+
   tasks:
+    # ---------------------------------------------------------
+    # init defaults
+    # ---------------------------------------------------------
     - name: "U_57 | init defaults"
       ansible.builtin.set_fact:
         ftpusers_path: ""
@@ -52,6 +67,7 @@
         vsftpd_userlist_enable: ""
         vsftpd_userlist_deny: ""
 
+        # registers
         r_u571_line: {}
         r_u571_perm: {}
 
@@ -61,10 +77,13 @@
         r_u573_line: {}
         r_u573_perm: {}
 
-        r_u574_rootlogin: {}
-        r_u574_restart: {}
+        r_u574_line: {}
+        r_u574_perm: {}
 
-        # 결과 계산용(문법 안정)
+        r_u575_rootlogin: {}
+        r_u575_restart: {}
+
+        # 결과 변수(U_57_1~U_57_5)
         u571_status: 0
         u571_desc: ""
         u571_result: ""
@@ -84,9 +103,16 @@
         u574_desc: ""
         u574_result: ""
         u574_cmd: ""
+
+        u575_status: 0
+        u575_desc: ""
+        u575_result: ""
+        u575_cmd: ""
       changed_when: false
 
+    # ---------------------------------------------------------
     # meta
+    # ---------------------------------------------------------
     - name: "U_57 | meta | hostname"
       ansible.builtin.command: "hostname"
       register: m_host
@@ -109,13 +135,15 @@
         META_USER: "{{ m_user.stdout | default('') }}"
       changed_when: false
 
-    # path select
+    # ---------------------------------------------------------
+    # path select (존재하는 첫 번째)
+    # ---------------------------------------------------------
     - name: "U_57 | select ftpusers path"
       ansible.builtin.shell: |
         for p in {{ ftpusers_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
         done
-        exit 1
+        exit 0
       register: r_sel_ftpusers
       changed_when: false
       failed_when: false
@@ -125,7 +153,7 @@
         for p in {{ vsftpd_conf_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
         done
-        exit 1
+        exit 0
       register: r_sel_vsconf
       changed_when: false
       failed_when: false
@@ -135,7 +163,7 @@
         for p in {{ vsftpd_ftpusers_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
         done
-        exit 1
+        exit 0
       register: r_sel_vsftpusers
       changed_when: false
       failed_when: false
@@ -145,7 +173,7 @@
         for p in {{ vsftpd_user_list_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
         done
-        exit 1
+        exit 0
       register: r_sel_vsuserlist
       changed_when: false
       failed_when: false
@@ -155,7 +183,7 @@
         for p in {{ proftpd_conf_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
         done
-        exit 1
+        exit 0
       register: r_sel_proconf
       changed_when: false
       failed_when: false
@@ -169,7 +197,9 @@
         proftpd_conf_path: "{{ r_sel_proconf.stdout | default('') }}"
       changed_when: false
 
-    # vsftpd parse
+    # ---------------------------------------------------------
+    # vsftpd parse (userlist_enable / userlist_deny)
+    # ---------------------------------------------------------
     - name: "U_57 | parse vsftpd userlist_enable/userlist_deny"
       ansible.builtin.shell: |
         e="$(grep -E '^[[:space:]]*userlist_enable=' '{{ vsftpd_conf_path }}' 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]')"
@@ -189,11 +219,11 @@
       when: (vsftpd_conf_path | length) > 0
 
     # =========================================================
-    # U_57_1
+    # U_57_1) 기본 FTP ftpusers(root 차단)
     # =========================================================
     - name: "U_57 | [U_57_1] basic ftpusers deny root + perms + logs/json"
       block:
-        - name: "U_57_1 | ensure root present(not commented) in ftpusers"
+        - name: "U_57_1 | ensure root present in ftpusers"
           ansible.builtin.lineinfile:
             path: "{{ ftpusers_path }}"
             regexp: '^[[:space:]]*#*[[:space:]]*root[[:space:]]*$'
@@ -215,64 +245,54 @@
           when: (ftpusers_path | length) > 0
           failed_when: false
 
-        - name: "U_57_1 | compute | init"
+        - name: "U_57_1 | compute"
           ansible.builtin.set_fact:
             u571_cmd: "edit {{ ftpusers_path | default('<none>') }} : ensure line=root; chown root:root; chmod 640"
-            u571_status: 0
-            u571_desc: ""
-          changed_when: false
-
-        - name: "U_57_1 | compute | ftpusers missing"
-          ansible.builtin.set_fact:
-            u571_status: 0
-            u571_desc: "ftpusers 파일이 없어 조치하지 않았습니다"
-          changed_when: false
-          when: (ftpusers_path | length) == 0
-
-        - name: "U_57_1 | compute | apply success"
-          ansible.builtin.set_fact:
-            u571_status: 2
-            u571_desc: "ftpusers에 root 차단을 적용하고 권한(root:root, 640)을 설정했습니다"
-          changed_when: false
-          when:
-            - (ftpusers_path | length) > 0
-            - not ((r_u571_line.failed | default(false)) | bool)
-            - not ((r_u571_perm.failed | default(false)) | bool)
-
-        - name: "U_57_1 | compute | apply failed"
-          ansible.builtin.set_fact:
-            u571_status: 0
-            u571_desc: "ftpusers 수정/권한 변경 실패로 조치하지 못했습니다"
-          changed_when: false
-          when:
-            - (ftpusers_path | length) > 0
-            - ((r_u571_line.failed | default(false)) | bool) or ((r_u571_perm.failed | default(false)) | bool)
-
-        - name: "U_57_1 | compute | finalize result"
-          ansible.builtin.set_fact:
+            u571_status: >-
+              {{
+                (ftpusers_path | length) == 0
+                | ternary(
+                    0,
+                    (
+                      ((r_u571_line.failed | default(false)) | bool) or ((r_u571_perm.failed | default(false)) | bool)
+                    ) | ternary(0, 2)
+                  )
+              }}
+            u571_desc: >-
+              {{
+                (ftpusers_path | length) == 0
+                | ternary(
+                    "ftpusers 파일이 없어 조치하지 않았습니다",
+                    (
+                      ((r_u571_line.failed | default(false)) | bool) or ((r_u571_perm.failed | default(false)) | bool)
+                    ) | ternary(
+                      "ftpusers 수정/권한 변경 실패로 조치하지 못했습니다",
+                      "ftpusers에 root 차단을 적용하고 권한(root:root, 640)을 설정했습니다"
+                    )
+                  )
+              }}
             u571_result: "{{ ((u571_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
           changed_when: false
 
-        - name: "U_57_1 | emit stderr log JSON (UTF8-safe)"
+        - name: "U_57_1 | emit stderr log JSON"
           delegate_to: localhost
           become: false
           ansible.builtin.shell: |
             printf '%s\n' '{{ {
               "ts": (ts.stderr_ts | default("")),
               "flag_id": "U_57_1",
-              "section": LOG_SECTION_STEP,
-              "title": "[U_57_1] (기본 FTP) ftpusers에 root 차단 설정",
+              "section": "기본 FTP ftpusers 파일에 root 계정 차단 설정 및 권한(640) 적용",
+              "title": "[U_57_1] (기본 FTP) ftpusers에 root 차단",
               "cmd": u571_cmd,
               "result": u571_result
             } | to_json }}' \
             | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_log_file }}' 1>&2
           vars:
-            ts:
-              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+            ts: { stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}" }
           changed_when: false
 
-        - name: "U_57_1 | emit stdout result JSON (UTF8-safe)"
+        - name: "U_57_1 | emit stdout result JSON"
           delegate_to: localhost
           become: false
           ansible.builtin.shell: |
@@ -289,18 +309,17 @@
             | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_json_file }}'
           vars:
-            ts:
-              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+            ts: { stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}" }
           changed_when: false
       when:
         - "'U_57_1' in (flag_list | default([]))"
 
     # =========================================================
-    # U_57_2
+    # U_57_2) vsftpd ftpusers(root 차단) (userlist_enable=NO 전제)
     # =========================================================
     - name: "U_57 | [U_57_2] vsftpd ftpusers deny root (when userlist_enable=NO) + logs/json"
       block:
-        - name: "U_57_2 | ensure root present in /etc/vsftpd/ftpusers"
+        - name: "U_57_2 | ensure root present in vsftpd ftpusers"
           ansible.builtin.lineinfile:
             path: "{{ vsftpd_ftpusers_path }}"
             regexp: '^[[:space:]]*#*[[:space:]]*root[[:space:]]*$'
@@ -311,10 +330,11 @@
           register: r_u572_line
           when:
             - (vsftpd_ftpusers_path | length) > 0
+            - (vsftpd_conf_path | length) > 0
             - (vsftpd_userlist_enable | default('') | upper) == "NO"
           failed_when: false
 
-        - name: "U_57_2 | enforce perms on /etc/vsftpd/ftpusers"
+        - name: "U_57_2 | enforce perms on vsftpd ftpusers"
           ansible.builtin.file:
             path: "{{ vsftpd_ftpusers_path }}"
             owner: "{{ AUTO_OWNER }}"
@@ -323,81 +343,72 @@
           register: r_u572_perm
           when:
             - (vsftpd_ftpusers_path | length) > 0
+            - (vsftpd_conf_path | length) > 0
             - (vsftpd_userlist_enable | default('') | upper) == "NO"
           failed_when: false
 
-        - name: "U_57_2 | compute | init"
+        - name: "U_57_2 | compute"
           ansible.builtin.set_fact:
             u572_cmd: >-
-              check vsftpd.conf userlist_enable;
+              check {{ vsftpd_conf_path | default("<none>") }} userlist_enable;
               (if enable=NO) edit {{ vsftpd_ftpusers_path | default("<none>") }} : ensure line=root; chown root:root; chmod 640
-            u572_status: 0
-            u572_desc: ""
-          changed_when: false
-
-        - name: "U_57_2 | compute | missing file"
-          ansible.builtin.set_fact:
-            u572_status: 0
-            u572_desc: "/etc/vsftpd/ftpusers 파일이 없어 조치하지 않았습니다"
-          changed_when: false
-          when:
-            - (vsftpd_ftpusers_path | default('') | length) == 0
-
-        - name: "U_57_2 | compute | skip (precondition not met)"
-          ansible.builtin.set_fact:
-            u572_status: 2
-            u572_desc: "userlist_enable=NO 전제가 아니라 ftpusers 방식 조치를 스킵했습니다(현재={{ vsftpd_userlist_enable | default('<unset>') }})"
-          changed_when: false
-          when:
-            - (vsftpd_ftpusers_path | default('') | length) > 0
-            - (vsftpd_userlist_enable | default('') | upper) != "NO"
-
-        - name: "U_57_2 | compute | apply success"
-          ansible.builtin.set_fact:
-            u572_status: 2
-            u572_desc: "vsftpd ftpusers({{ vsftpd_ftpusers_path }})에 root 차단을 적용하고 권한(root:root, 640)을 설정했습니다"
-          changed_when: false
-          when:
-            - (vsftpd_ftpusers_path | default('') | length) > 0
-            - (vsftpd_userlist_enable | default('') | upper) == "NO"
-            - not ((r_u572_line.failed | default(false)) | bool)
-            - not ((r_u572_perm.failed | default(false)) | bool)
-
-        - name: "U_57_2 | compute | apply failed"
-          ansible.builtin.set_fact:
-            u572_status: 0
-            u572_desc: "vsftpd ftpusers 수정/권한 변경 실패로 조치하지 못했습니다"
-          changed_when: false
-          when:
-            - (vsftpd_ftpusers_path | default('') | length) > 0
-            - (vsftpd_userlist_enable | default('') | upper) == "NO"
-            - ((r_u572_line.failed | default(false)) | bool) or ((r_u572_perm.failed | default(false)) | bool)
-
-        - name: "U_57_2 | compute | finalize result"
-          ansible.builtin.set_fact:
+            u572_status: >-
+              {{
+                ((vsftpd_conf_path | length) == 0) or ((vsftpd_ftpusers_path | length) == 0)
+                | ternary(
+                    0,
+                    ((vsftpd_userlist_enable | default('') | upper) != "NO")
+                    | ternary(
+                        2,
+                        (
+                          ((r_u572_line.failed | default(false)) | bool) or ((r_u572_perm.failed | default(false)) | bool)
+                        ) | ternary(0, 2)
+                      )
+                  )
+              }}
+            u572_desc: >-
+              {{
+                (vsftpd_conf_path | length) == 0
+                | ternary(
+                    "vsftpd.conf가 없어 전제(userlist_enable) 확인이 불가하여 수동조치로 전환했습니다",
+                    (vsftpd_ftpusers_path | length) == 0
+                    | ternary(
+                        "vsftpd ftpusers 파일이 없어 조치하지 않았습니다",
+                        ((vsftpd_userlist_enable | default('') | upper) != "NO")
+                        | ternary(
+                            "userlist_enable=NO 전제가 아니라 ftpusers 방식 조치를 스킵했습니다(현재=" ~ (vsftpd_userlist_enable | default('<unset>')) ~ ")",
+                            (
+                              ((r_u572_line.failed | default(false)) | bool) or ((r_u572_perm.failed | default(false)) | bool)
+                            ) | ternary(
+                              "vsftpd ftpusers 수정/권한 변경 실패로 조치하지 못했습니다",
+                              "vsftpd ftpusers에 root 차단을 적용하고 권한(root:root, 640)을 설정했습니다"
+                            )
+                          )
+                      )
+                  )
+              }}
             u572_result: "{{ ((u572_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
           changed_when: false
 
-        - name: "U_57_2 | emit stderr log JSON (UTF8-safe)"
+        - name: "U_57_2 | emit stderr log JSON"
           delegate_to: localhost
           become: false
           ansible.builtin.shell: |
             printf '%s\n' '{{ {
               "ts": (ts.stderr_ts | default("")),
               "flag_id": "U_57_2",
-              "section": LOG_SECTION_STEP,
-              "title": "[U_57_2] (vsftpd) ftpusers에 root 차단 설정(userlist_enable=NO 전제)",
+              "section": "vsftpd ftpusers 파일에 root 계정 차단 설정( userlist_enable=NO 전제 ) 및 권한(640) 적용",
+              "title": "[U_57_2] (vsftpd) ftpusers에 root 차단",
               "cmd": u572_cmd,
               "result": u572_result
             } | to_json }}' \
             | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_log_file }}' 1>&2
           vars:
-            ts:
-              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+            ts: { stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}" }
           changed_when: false
 
-        - name: "U_57_2 | emit stdout result JSON (UTF8-safe)"
+        - name: "U_57_2 | emit stdout result JSON"
           delegate_to: localhost
           become: false
           ansible.builtin.shell: |
@@ -414,14 +425,13 @@
             | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_json_file }}'
           vars:
-            ts:
-              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+            ts: { stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}" }
           changed_when: false
       when:
         - "'U_57_2' in (flag_list | default([]))"
 
     # =========================================================
-    # U_57_3
+    # U_57_3) vsftpd user_list(root 차단) (enable=YES & deny=YES 전제)
     # =========================================================
     - name: "U_57 | [U_57_3] vsftpd user_list deny root (when enable=YES & deny=YES) + logs/json"
       block:
@@ -436,6 +446,7 @@
           register: r_u573_line
           when:
             - (vsftpd_user_list_path | length) > 0
+            - (vsftpd_conf_path | length) > 0
             - (vsftpd_userlist_enable | default('') | upper) == "YES"
             - (vsftpd_userlist_deny | default('') | upper) == "YES"
           failed_when: false
@@ -449,88 +460,79 @@
           register: r_u573_perm
           when:
             - (vsftpd_user_list_path | length) > 0
+            - (vsftpd_conf_path | length) > 0
             - (vsftpd_userlist_enable | default('') | upper) == "YES"
             - (vsftpd_userlist_deny | default('') | upper) == "YES"
           failed_when: false
 
-        - name: "U_57_3 | compute | init"
+        - name: "U_57_3 | compute"
           ansible.builtin.set_fact:
             u573_cmd: >-
-              check vsftpd.conf userlist_enable/userlist_deny;
+              check {{ vsftpd_conf_path | default("<none>") }} userlist_enable/userlist_deny;
               (if enable=YES & deny=YES) edit {{ vsftpd_user_list_path | default("<none>") }} : ensure line=root; chown root:root; chmod 640
-            u573_status: 0
-            u573_desc: ""
-          changed_when: false
-
-        - name: "U_57_3 | compute | missing file"
-          ansible.builtin.set_fact:
-            u573_status: 0
-            u573_desc: "/etc/vsftpd/user_list 파일이 없어 조치하지 않았습니다"
-          changed_when: false
-          when:
-            - (vsftpd_user_list_path | default('') | length) == 0
-
-        - name: "U_57_3 | compute | skip (precondition not met)"
-          ansible.builtin.set_fact:
-            u573_status: 2
+            u573_status: >-
+              {{
+                ((vsftpd_conf_path | length) == 0) or ((vsftpd_user_list_path | length) == 0)
+                | ternary(
+                    0,
+                    (
+                      ((vsftpd_userlist_enable | default('') | upper) != "YES")
+                      or ((vsftpd_userlist_deny | default('') | upper) != "YES")
+                    )
+                    | ternary(
+                        2,
+                        (
+                          ((r_u573_line.failed | default(false)) | bool) or ((r_u573_perm.failed | default(false)) | bool)
+                        ) | ternary(0, 2)
+                      )
+                  )
+              }}
             u573_desc: >-
-              enable=YES & deny=YES 전제가 아니라 user_list 방식 조치를 스킵했습니다
-              (enable={{ vsftpd_userlist_enable | default('<unset>') }},
-               deny={{ vsftpd_userlist_deny | default('<unset>') }})
-          changed_when: false
-          when:
-            - (vsftpd_user_list_path | default('') | length) > 0
-            - (vsftpd_userlist_enable | default('') | upper) != "YES"
-              or (vsftpd_userlist_deny | default('') | upper) != "YES"
-
-        - name: "U_57_3 | compute | apply success"
-          ansible.builtin.set_fact:
-            u573_status: 2
-            u573_desc: "user_list({{ vsftpd_user_list_path }})에 root 차단을 적용하고 권한(root:root, 640)을 설정했습니다"
-          changed_when: false
-          when:
-            - (vsftpd_user_list_path | default('') | length) > 0
-            - (vsftpd_userlist_enable | default('') | upper) == "YES"
-            - (vsftpd_userlist_deny | default('') | upper) == "YES"
-            - not ((r_u573_line.failed | default(false)) | bool)
-            - not ((r_u573_perm.failed | default(false)) | bool)
-
-        - name: "U_57_3 | compute | apply failed"
-          ansible.builtin.set_fact:
-            u573_status: 0
-            u573_desc: "user_list 수정/권한 변경 실패로 조치하지 못했습니다"
-          changed_when: false
-          when:
-            - (vsftpd_user_list_path | default('') | length) > 0
-            - (vsftpd_userlist_enable | default('') | upper) == "YES"
-            - (vsftpd_userlist_deny | default('') | upper) == "YES"
-            - ((r_u573_line.failed | default(false)) | bool) or ((r_u573_perm.failed | default(false)) | bool)
-
-        - name: "U_57_3 | compute | finalize result"
-          ansible.builtin.set_fact:
+              {{
+                (vsftpd_conf_path | length) == 0
+                | ternary(
+                    "vsftpd.conf가 없어 전제(userlist_enable/userlist_deny) 확인이 불가하여 수동조치로 전환했습니다",
+                    (vsftpd_user_list_path | length) == 0
+                    | ternary(
+                        "vsftpd user_list 파일이 없어 조치하지 않았습니다",
+                        (
+                          ((vsftpd_userlist_enable | default('') | upper) != "YES")
+                          or ((vsftpd_userlist_deny | default('') | upper) != "YES")
+                        )
+                        | ternary(
+                            "enable=YES & deny=YES 전제가 아니라 user_list 방식 조치를 스킵했습니다(enable=" ~ (vsftpd_userlist_enable | default('<unset>')) ~ ", deny=" ~ (vsftpd_userlist_deny | default('<unset>')) ~ ")",
+                            (
+                              ((r_u573_line.failed | default(false)) | bool) or ((r_u573_perm.failed | default(false)) | bool)
+                            ) | ternary(
+                              "user_list 수정/권한 변경 실패로 조치하지 못했습니다",
+                              "user_list에 root 차단을 적용하고 권한(root:root, 640)을 설정했습니다"
+                            )
+                          )
+                      )
+                  )
+              }}
             u573_result: "{{ ((u573_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
           changed_when: false
 
-        - name: "U_57_3 | emit stderr log JSON (UTF8-safe)"
+        - name: "U_57_3 | emit stderr log JSON"
           delegate_to: localhost
           become: false
           ansible.builtin.shell: |
             printf '%s\n' '{{ {
               "ts": (ts.stderr_ts | default("")),
               "flag_id": "U_57_3",
-              "section": LOG_SECTION_STEP,
-              "title": "[U_57_3] (vsftpd) user_list에 root 차단 설정(enable=YES & deny=YES 전제)",
+              "section": "vsftpd user_list 파일에 root 계정 차단 설정( enable=YES & deny=YES 전제 ) 및 권한(640) 적용",
+              "title": "[U_57_3] (vsftpd) user_list에 root 차단",
               "cmd": u573_cmd,
               "result": u573_result
             } | to_json }}' \
             | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_log_file }}' 1>&2
           vars:
-            ts:
-              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+            ts: { stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}" }
           changed_when: false
 
-        - name: "U_57_3 | emit stdout result JSON (UTF8-safe)"
+        - name: "U_57_3 | emit stdout result JSON"
           delegate_to: localhost
           become: false
           ansible.builtin.shell: |
@@ -547,98 +549,76 @@
             | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_json_file }}'
           vars:
-            ts:
-              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+            ts: { stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}" }
           changed_when: false
       when:
         - "'U_57_3' in (flag_list | default([]))"
 
     # =========================================================
-    # U_57_4
+    # U_57_4) ProFTPD ftpusers(/etc/ftpd/ftpusers) root 차단
     # =========================================================
-    - name: "U_57 | [U_57_4] ProFTPD RootLogin off + restart (when changed) + logs/json"
+    - name: "U_57 | [U_57_4] proftpd ftpusers deny root + perms + logs/json"
       block:
-        - name: "U_57_4 | ensure RootLogin off"
+        - name: "U_57_4 | ensure root present in /etc/ftpd/ftpusers"
           ansible.builtin.lineinfile:
-            path: "{{ proftpd_conf_path }}"
-            regexp: '^[[:space:]]*RootLogin[[:space:]]+'
-            line: "RootLogin off"
+            path: "{{ proftpd_ftpusers_fixed }}"
+            regexp: '^[[:space:]]*#*[[:space:]]*root[[:space:]]*$'
+            line: "root"
+            insertafter: EOF
             create: no
             backup: yes
-          register: r_u574_rootlogin
-          when: (proftpd_conf_path | length) > 0
+          register: r_u574_line
           failed_when: false
 
-        - name: "U_57_4 | restart proftpd (only when changed)"
-          ansible.builtin.systemd:
-            name: "proftpd"
-            state: restarted
-          register: r_u574_restart
+        - name: "U_57_4 | enforce perms on /etc/ftpd/ftpusers"
+          ansible.builtin.file:
+            path: "{{ proftpd_ftpusers_fixed }}"
+            owner: "{{ AUTO_OWNER }}"
+            group: "{{ AUTO_GROUP }}"
+            mode: "{{ AUTO_MODE }}"
+          register: r_u574_perm
           failed_when: false
-          when:
-            - (proftpd_conf_path | length) > 0
-            - ((r_u574_rootlogin.changed | default(false)) | bool)
 
-        - name: "U_57_4 | compute | init"
+        - name: "U_57_4 | compute"
           ansible.builtin.set_fact:
-            u574_cmd: "proftpd.conf: RootLogin off; (if changed) systemctl restart proftpd"
-            u574_status: 0
-            u574_desc: ""
-          changed_when: false
-
-        - name: "U_57_4 | compute | missing proftpd.conf"
-          ansible.builtin.set_fact:
-            u574_status: 0
-            u574_desc: "proftpd.conf가 없어 조치하지 않았습니다"
-          changed_when: false
-          when:
-            - (proftpd_conf_path | default('') | length) == 0
-
-        - name: "U_57_4 | compute | apply failed"
-          ansible.builtin.set_fact:
-            u574_status: 0
-            u574_desc: "RootLogin 설정 반영에 실패했습니다"
-          changed_when: false
-          when:
-            - (proftpd_conf_path | default('') | length) > 0
-            - (r_u574_rootlogin.failed | default(false)) | bool
-
-        - name: "U_57_4 | compute | apply success"
-          ansible.builtin.set_fact:
-            u574_status: 2
+            u574_cmd: "edit {{ proftpd_ftpusers_fixed }} : ensure line=root; chown root:root; chmod 640"
+            u574_status: >-
+              {{
+                (
+                  ((r_u574_line.failed | default(false)) | bool) or ((r_u574_perm.failed | default(false)) | bool)
+                ) | ternary(0, 2)
+              }}
             u574_desc: >-
-              ProFTPD RootLogin을 off로 정합했습니다
-              (변경 시 재시작 포함)
-          changed_when: false
-          when:
-            - (proftpd_conf_path | default('') | length) > 0
-            - not ((r_u574_rootlogin.failed | default(false)) | bool)
-
-        - name: "U_57_4 | compute | finalize result"
-          ansible.builtin.set_fact:
+              {{
+                (
+                  ((r_u574_line.failed | default(false)) | bool) or ((r_u574_perm.failed | default(false)) | bool)
+                ) | ternary(
+                  "/etc/ftpd/ftpusers 수정/권한 변경 실패로 조치하지 못했습니다(파일 미존재/권한 문제 가능)",
+                  "/etc/ftpd/ftpusers에 root 차단을 적용하고 권한(root:root, 640)을 설정했습니다"
+                )
+              }}
             u574_result: "{{ ((u574_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
           changed_when: false
 
-        - name: "U_57_4 | emit stderr log JSON (UTF8-safe)"
+        - name: "U_57_4 | emit stderr log JSON"
           delegate_to: localhost
           become: false
           ansible.builtin.shell: |
             printf '%s\n' '{{ {
               "ts": (ts.stderr_ts | default("")),
               "flag_id": "U_57_4",
-              "section": LOG_SECTION_STEP,
-              "title": "[U_57_4] ProFTPD RootLogin off 설정 및 서비스 재시작(변경 시)",
+              "section": "ProFTPD ftpusers(/etc/ftpd/ftpusers) 파일에 root 계정 차단 설정 및 권한(640) 적용",
+              "title": "[U_57_4] (ProFTPD) ftpusers에 root 차단",
               "cmd": u574_cmd,
               "result": u574_result
             } | to_json }}' \
             | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_log_file }}' 1>&2
           vars:
-            ts:
-              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+            ts: { stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}" }
           changed_when: false
 
-        - name: "U_57_4 | emit stdout result JSON (UTF8-safe)"
+        - name: "U_57_4 | emit stdout result JSON"
           delegate_to: localhost
           become: false
           ansible.builtin.shell: |
@@ -655,8 +635,99 @@
             | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
             | tee -a '{{ my_json_file }}'
           vars:
-            ts:
-              stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}"
+            ts: { stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}" }
           changed_when: false
       when:
         - "'U_57_4' in (flag_list | default([]))"
+
+    # =========================================================
+    # U_57_5) ProFTPD RootLogin off + restart(변경 시)
+    # =========================================================
+    - name: "U_57 | [U_57_5] ProFTPD RootLogin off + restart (when changed) + logs/json"
+      block:
+        - name: "U_57_5 | ensure RootLogin off"
+          ansible.builtin.lineinfile:
+            path: "{{ proftpd_conf_path }}"
+            regexp: '^[[:space:]]*RootLogin[[:space:]]+'
+            line: "RootLogin off"
+            create: no
+            backup: yes
+          register: r_u575_rootlogin
+          when: (proftpd_conf_path | length) > 0
+          failed_when: false
+
+        - name: "U_57_5 | restart proftpd (only when changed)"
+          ansible.builtin.systemd:
+            name: "{{ svc_proftpd }}"
+            state: restarted
+          register: r_u575_restart
+          failed_when: false
+          when:
+            - (proftpd_conf_path | length) > 0
+            - ((r_u575_rootlogin.changed | default(false)) | bool)
+
+        - name: "U_57_5 | compute"
+          ansible.builtin.set_fact:
+            u575_cmd: "set RootLogin off in {{ proftpd_conf_path | default('<none>') }}; (if changed) systemctl restart {{ svc_proftpd }}"
+            u575_status: >-
+              {{
+                (proftpd_conf_path | length) == 0
+                | ternary(
+                    0,
+                    ((r_u575_rootlogin.failed | default(false)) | bool) | ternary(0, 2)
+                  )
+              }}
+            u575_desc: >-
+              {{
+                (proftpd_conf_path | length) == 0
+                | ternary(
+                    "ProFTPD 설정 파일이 없어 조치하지 않았습니다",
+                    ((r_u575_rootlogin.failed | default(false)) | bool)
+                    | ternary(
+                        "RootLogin off 설정 반영에 실패했습니다",
+                        "ProFTPD RootLogin을 off로 정합했습니다(변경 시 서비스 재시작 포함)"
+                      )
+                  )
+              }}
+            u575_result: "{{ ((u575_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
+          changed_when: false
+
+        - name: "U_57_5 | emit stderr log JSON"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "ts": (ts.stderr_ts | default("")),
+              "flag_id": "U_57_5",
+              "section": "ProFTPD 설정 파일에 RootLogin off 적용 및 proftpd 재시작(변경 시)",
+              "title": "[U_57_5] ProFTPD RootLogin off 설정",
+              "cmd": u575_cmd,
+              "result": u575_result
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts: { stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}" }
+          changed_when: false
+
+        - name: "U_57_5 | emit stdout result JSON"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: |
+            printf '%s\n' '{{ {
+              "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
+              "result": {
+                "flag_id": "U_57_5",
+                "status": (u575_status | int),
+                "description": u575_desc,
+                "category": "service",
+                "timestamp": (ts.stdout_ts | default(""))
+              }
+            } | to_json }}' \
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            | tee -a '{{ my_json_file }}'
+          vars:
+            ts: { stdout_ts: "{{ lookup('pipe', TS_STDOUT_CMD) }}" }
+          changed_when: false
+      when:
+        - "'U_57_5' in (flag_list | default([]))"
