@@ -240,20 +240,36 @@
     - name: "[U_03_3] Modern OS Faillock Remediation"
       when:
         - "'U_03_3' in flag_list"
-        # RHEL 8 이상 또는 Ubuntu 20 이상일 때 실행
         - (ansible_os_family == 'RedHat' and ansible_distribution_major_version|int >= 8) or
           (ansible_os_family == 'Debian' and ansible_distribution_major_version|int >= 20)
       block:
         # --- RedHat (Rocky 9) Logic ---
+        - name: "RedHat: Check current authselect profile"
+          command: authselect current
+          register: r_authselect_current
+          changed_when: false
+          ignore_errors: yes
+          when: ansible_os_family == 'RedHat'
+
+        # 프로파일이 선택되지 않은 경우('No existing configuration') 기본 프로파일(sssd) 선택
+        - name: "RedHat: Select default authselect profile if none"
+          command: authselect select sssd --force
+          when: 
+            - ansible_os_family == 'RedHat'
+            - "'No existing configuration' in r_authselect_current.stdout or r_authselect_current.rc != 0"
+
         - name: "RedHat: Enable faillock via authselect"
           command: "authselect enable-feature with-faillock"
-          register: r_authselect
-          changed_when: "'No changes' not in r_authselect.stdout"
+          register: r_authselect_enable
+          # 이미 활성화되어 있으면 'No changes'라고 뜨므로 변경 없음 처리
+          changed_when: "'No changes' not in r_authselect_enable.stdout"
           when: ansible_os_family == 'RedHat'
         
         - name: "RedHat: Apply authselect changes"
           command: "authselect apply-changes"
-          when: ansible_os_family == 'RedHat' and r_authselect.changed
+          when: 
+            - ansible_os_family == 'RedHat' 
+            - r_authselect_enable.changed
 
         # --- Debian (Ubuntu 24) Logic ---
         - name: "Debian: Ensure pam_faillock.so is in common-auth"
@@ -326,7 +342,7 @@
               }
 
       rescue:
-        # [중단/실패: Status 1]
+        # [중단/실패: Status 1] - 실패 원인(msg)을 description에 추가
         - name: "Log U_03_3 Failure (JSON)"
           delegate_to: localhost
           become: false
@@ -344,7 +360,7 @@
                 "result": {
                   "flag_id": "U_03_3",
                   "status": 1,
-                  "description": "조치 중단: faillock 설정 중 에러 발생",
+                  "description": "조치 중단: {{ ansible_failed_result.msg | default('알 수 없는 에러') }}",
                   "category": "{{ category }}",
                   "timestamp": "{{ ts_stdout }}"
                 }
@@ -364,5 +380,5 @@
                 "section": "[조치 결과]",
                 "title": "[U_03_3] 조치 중단",
                 "cmd": "Ansible Task Failed (Rescue)",
-                "result": "조치 중단 (status: 1)"
-              }
+                "result": "조치 중단 (status: 1) - {{ ansible_failed_result.msg | default('Check Console Output') }}"
+              }    
