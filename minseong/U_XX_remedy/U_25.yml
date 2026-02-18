@@ -35,25 +35,6 @@
       when: world_writable_files.stdout_lines | length > 0
       register: remediation_output
 
-    - name: "STDERR"
-      delegate_to: localhost          # [필수] Controller에 저장
-      become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
-      ansible.builtin.lineinfile:
-       path: "{{ my_log_file }}_U_25.log"     # [필수] vars에 선언한 로그 파일 경로
-       create: yes                   # [옵션] 파일 없으면 생성
-       mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
-       line: >-
-        {{
-         {
-          "ts": ts_stderr,
-          "flag_id": "U_25_1",
-          "section": "[조치 내용]",
-          "title": "[U_25_1] (일반 사용자 쓰기 권한 제거)",
-          "cmd": " chmod o-w <파일 이름> ",
-          "result": "조치 성공 (일반 사용자 쓰기 권한 제거)"
-         } |  to_json(ensure_ascii=False)
-        }}
-      when: "'U_25_1' in flag_list" 
 
     - name: " 소유자가 존재하지 않는 파일 또는 디렉터리 제거"
       file:
@@ -75,9 +56,9 @@
           "ts": ts_stderr,
           "flag_id": "U_25_1",
           "section": "[조치 내용]",
-          "title": "[U_25_1] (소유자가 존재하지 않는 파일 또는 디렉터리 제거)",
-          "cmd": " rm <파일 이름> ",
-          "result": "조치 성공 (소유자가 존재하지 않는 파일 또는 디렉터리 제거)"
+          "title": "[U_25_1] (소유자가 존재하지 않는 파일 또는 디렉터리 제거 및 일반 사용자 쓰기 권한 제거)",
+          "cmd": " chmod o-w <파일 이름>, rm <파일 이름> ",
+          "result": "조치 성공 (소유자가 존재하지 않는 파일 또는 디렉터리 제거 및 일반 사용자 쓰기 권한 제거)"
          } |  to_json(ensure_ascii=False)
         }}
       when: "'U_25_1' in flag_list" 
