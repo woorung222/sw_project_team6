@@ -1,11 +1,11 @@
 ---
-- name: "U-57 | Remediate FTP Root Login Restriction (Controlled Env, Logs+JSON to /tmp, Stream-Split)"
+- name: "U_57 | Remediate FTP Root Login Restriction (Controlled Env, Logs+JSON to /tmp, Stream-Split)"
   hosts: all
   become: yes
   gather_facts: no
 
   vars:
-    FLAG_ID: "U-57"
+    FLAG_ID: "U_57"
 
     ftpusers_candidates:
       - "/etc/ftpusers"
@@ -41,7 +41,7 @@
     my_json_file: "{{ json_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.json"
 
   tasks:
-    - name: "U-57 | init defaults"
+    - name: "U_57 | init defaults"
       ansible.builtin.set_fact:
         ftpusers_path: ""
         vsftpd_conf_path: ""
@@ -87,22 +87,22 @@
       changed_when: false
 
     # meta
-    - name: "U-57 | meta | hostname"
+    - name: "U_57 | meta | hostname"
       ansible.builtin.command: "hostname"
       register: m_host
       changed_when: false
 
-    - name: "U-57 | meta | ip"
+    - name: "U_57 | meta | ip"
       ansible.builtin.shell: "hostname -I | awk '{print $1}'"
       register: m_ip
       changed_when: false
 
-    - name: "U-57 | meta | user"
+    - name: "U_57 | meta | user"
       ansible.builtin.command: "whoami"
       register: m_user
       changed_when: false
 
-    - name: "U-57 | meta | set_fact"
+    - name: "U_57 | meta | set_fact"
       ansible.builtin.set_fact:
         META_HOSTNAME: "{{ m_host.stdout | default('') }}"
         META_IP: "{{ m_ip.stdout | default('') }}"
@@ -110,7 +110,7 @@
       changed_when: false
 
     # path select
-    - name: "U-57 | select ftpusers path"
+    - name: "U_57 | select ftpusers path"
       ansible.builtin.shell: |
         for p in {{ ftpusers_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
@@ -120,7 +120,7 @@
       changed_when: false
       failed_when: false
 
-    - name: "U-57 | select vsftpd conf path"
+    - name: "U_57 | select vsftpd conf path"
       ansible.builtin.shell: |
         for p in {{ vsftpd_conf_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
@@ -130,7 +130,7 @@
       changed_when: false
       failed_when: false
 
-    - name: "U-57 | select vsftpd ftpusers path"
+    - name: "U_57 | select vsftpd ftpusers path"
       ansible.builtin.shell: |
         for p in {{ vsftpd_ftpusers_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
@@ -140,7 +140,7 @@
       changed_when: false
       failed_when: false
 
-    - name: "U-57 | select vsftpd user_list path"
+    - name: "U_57 | select vsftpd user_list path"
       ansible.builtin.shell: |
         for p in {{ vsftpd_user_list_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
@@ -150,7 +150,7 @@
       changed_when: false
       failed_when: false
 
-    - name: "U-57 | select proftpd conf path"
+    - name: "U_57 | select proftpd conf path"
       ansible.builtin.shell: |
         for p in {{ proftpd_conf_candidates | join(' ') }}; do
           [ -f "$p" ] && echo "$p" && exit 0
@@ -160,7 +160,7 @@
       changed_when: false
       failed_when: false
 
-    - name: "U-57 | set_fact paths"
+    - name: "U_57 | set_fact paths"
       ansible.builtin.set_fact:
         ftpusers_path: "{{ r_sel_ftpusers.stdout | default('') }}"
         vsftpd_conf_path: "{{ r_sel_vsconf.stdout | default('') }}"
@@ -170,7 +170,7 @@
       changed_when: false
 
     # vsftpd parse
-    - name: "U-57 | parse vsftpd userlist_enable/userlist_deny"
+    - name: "U_57 | parse vsftpd userlist_enable/userlist_deny"
       ansible.builtin.shell: |
         e="$(grep -E '^[[:space:]]*userlist_enable=' '{{ vsftpd_conf_path }}' 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]')"
         d="$(grep -E '^[[:space:]]*userlist_deny='   '{{ vsftpd_conf_path }}' 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]')"
@@ -181,7 +181,7 @@
       failed_when: false
       when: (vsftpd_conf_path | length) > 0
 
-    - name: "U-57 | set_fact vsftpd settings"
+    - name: "U_57 | set_fact vsftpd settings"
       ansible.builtin.set_fact:
         vsftpd_userlist_enable: "{{ (r_vs_parse.stdout_lines[0] | default('')) }}"
         vsftpd_userlist_deny: "{{ (r_vs_parse.stdout_lines[1] | default('')) }}"
@@ -191,7 +191,7 @@
     # =========================================================
     # U_57_1
     # =========================================================
-    - name: "U-57 | [U_57_1] basic ftpusers deny root + perms + logs/json"
+    - name: "U_57 | [U_57_1] basic ftpusers deny root + perms + logs/json"
       block:
         - name: "U_57_1 | ensure root present(not commented) in ftpusers"
           ansible.builtin.lineinfile:
@@ -298,7 +298,7 @@
     # =========================================================
     # U_57_2
     # =========================================================
-    - name: "U-57 | [U_57_2] vsftpd ftpusers deny root (when userlist_enable=NO) + logs/json"
+    - name: "U_57 | [U_57_2] vsftpd ftpusers deny root (when userlist_enable=NO) + logs/json"
       block:
         - name: "U_57_2 | ensure root present in /etc/vsftpd/ftpusers"
           ansible.builtin.lineinfile:
@@ -423,7 +423,7 @@
     # =========================================================
     # U_57_3
     # =========================================================
-    - name: "U-57 | [U_57_3] vsftpd user_list deny root (when enable=YES & deny=YES) + logs/json"
+    - name: "U_57 | [U_57_3] vsftpd user_list deny root (when enable=YES & deny=YES) + logs/json"
       block:
         - name: "U_57_3 | ensure root present in user_list"
           ansible.builtin.lineinfile:
@@ -556,7 +556,7 @@
     # =========================================================
     # U_57_4
     # =========================================================
-    - name: "U-57 | [U_57_4] ProFTPD RootLogin off + restart (when changed) + logs/json"
+    - name: "U_57 | [U_57_4] ProFTPD RootLogin off + restart (when changed) + logs/json"
       block:
         - name: "U_57_4 | ensure RootLogin off"
           ansible.builtin.lineinfile:

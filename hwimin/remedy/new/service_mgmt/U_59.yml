@@ -1,5 +1,5 @@
 ---
-- name: "U_59 | Enforce SNMPv3 (Controlled Env, Logs+JSON to /tmp, Stream-Split, UTF8-safe, Host-Split)"
+- name: "U_59 | Enforce SNMPv3 (Controlled Env, Logs+JSON, Stream-Split, UTF8-safe, Host-Split)"
   hosts: all
   become: yes
   gather_facts: no
@@ -12,7 +12,7 @@
     snmpd_conf: "/etc/snmp/snmpd.conf"
 
     # ===== SNMPv3 입력 변수(값이 있어야만 자동 반영) =====
-    # 값 미제공 시: 자동조치 불가 → 수동조치로 넘기고 계속 진행(팀 조건)
+    # 값 미제공 시: 자동조치 불가 → 수동조치로 넘김(팀 조건)
     snmpv3_user_in: "{{ snmpv3_user | default('') }}"
     snmpv3_auth_proto_in: "{{ snmpv3_auth_proto | default('') }}"   # 예: SHA
     snmpv3_auth_pass_in: "{{ snmpv3_auth_pass | default('') }}"     # 예: myauthpass
@@ -25,17 +25,23 @@
     TS_STDOUT_CMD: "date +%Y_%m_%d' / '%H:%M:%S"
 
     # ==============================
-    # [팀 조건] 로그/JSON 경로 및 파일명 규칙
+    # [팀 조건] 로그/JSON 경로 및 파일명 규칙 (호스트별 분리 + scan 제거)
     # ==============================
     log_dir: "{{ isms_remediate_log_dir | default('/tmp') }}"
     json_dir: "{{ isms_remediate_json_dir | default('/tmp') }}"
 
-    # ✅ 핵심: inventory_hostname에서 '-scan' 제거한 값을 파일명으로 고정
     FILE_HOST: "{{ inventory_hostname | regex_replace('(-scan)$', '') }}"
-
-    # ✅ 무조건 FILE_HOST 사용 (set_fact로 덮어쓰기 필요 없음)
     my_log_file: "{{ log_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.log"
     my_json_file: "{{ json_dir }}/{{ FILE_HOST }}-remediate_{{ FLAG_ID }}.json"
+
+    # ==============================
+    # [가이드/근거] U_59_2 (SNMPv3 적용) - 코드에 포함 요구 반영
+    # ==============================
+    U_59_2_BASIS_TEXT: >-
+      SNMP 서비스를 사용해야 하는 경우, 안전하지 않은 SNMPv1/v2c(community 기반 평문/약한 통제)를 사용하지 않고
+      SNMPv3(인증+암호화 기반)로 사용자/접근제어를 구성해야 합니다.
+      snmpd.conf에 createUser 및 rouser/rwuser(또는 이에 준하는 접근제어)를 설정하고,
+      서비스 재기동을 통해 정책을 반영합니다. (자동조치를 위해서는 사용자/인증/암호화 관련 입력값이 필요)
 
   tasks:
     # ---------------------------------------------------------
@@ -54,7 +60,8 @@
         r_snmp_restart: {}
 
         v3_ready: false
-        v3_cmd: ""
+        v3_cmd_exec: ""
+        v3_cmd_log: ""
         v3_access_line: ""
 
         u591_cmd: ""
@@ -163,7 +170,7 @@
                   {% if stop_failed or dis_failed %}
                   snmpd 서비스가 활성/사용 상태여서 중지/비활성화를 시도했으나 일부 작업이 실패했습니다(stop_failed={{ stop_failed }}, disable_failed={{ dis_failed }})
                   {% else %}
-                  snmpd 서비스가 활성 상태여서 중지/비활성화를 적용했습니다
+                  snmpd 서비스가 활성/사용 상태여서 중지/비활성화를 적용했습니다
                   {% endif %}
               changed_when: false
               when:
@@ -178,7 +185,7 @@
         - name: "U_59_1 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
           delegate_to: localhost
           become: false
-          ansible.builtin.shell: |
+          ansible.builtin.shell: >
             printf '%s\n' '{{ {
               "ts": (ts_591_e.stderr_ts | default("")),
               "flag_id": "U_59_1",
@@ -186,8 +193,8 @@
               "title": "[U_59_1] SNMP(snmpd) 서비스 중지 및 비활성화",
               "cmd": u591_cmd,
               "result": u591_result
-            } | to_json }}' \
-            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            } | to_json }}'
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
             | tee -a '{{ my_log_file }}' 1>&2
           vars:
             ts_591_e:
@@ -197,7 +204,7 @@
         - name: "U_59_1 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
           delegate_to: localhost
           become: false
-          ansible.builtin.shell: |
+          ansible.builtin.shell: >
             printf '%s\n' '{{ {
               "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
               "result": {
@@ -207,8 +214,8 @@
                 "category": "service",
                 "timestamp": (ts_591_o.stdout_ts | default(""))
               }
-            } | to_json }}' \
-            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            } | to_json }}'
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
             | tee -a '{{ my_json_file }}'
           vars:
             ts_591_o:
@@ -233,11 +240,17 @@
                 and (snmpv3_priv_pass_in | length > 0)
                 and ((snmpv3_access_in | lower) in ["ro","rw"])
               }}
-            v3_cmd: >-
+            v3_cmd_exec: >-
               net-snmp-create-v3-user
               -{{ (snmpv3_access_in | lower) }}
               -a {{ snmpv3_auth_proto_in }} -A '{{ snmpv3_auth_pass_in }}'
               -x {{ snmpv3_priv_proto_in }} -X '{{ snmpv3_priv_pass_in }}'
+              {{ snmpv3_user_in }}
+            v3_cmd_log: >-
+              net-snmp-create-v3-user
+              -{{ (snmpv3_access_in | lower) }}
+              -a {{ snmpv3_auth_proto_in }} -A '***'
+              -x {{ snmpv3_priv_proto_in }} -X '***'
               {{ snmpv3_user_in }}
             v3_access_line: >-
               {{
@@ -247,7 +260,7 @@
           changed_when: false
 
         - name: "U_59_2 | create SNMPv3 user (net-snmp-create-v3-user) (only when inputs provided)"
-          ansible.builtin.shell: "{{ v3_cmd }}"
+          ansible.builtin.shell: "{{ v3_cmd_exec }}"
           register: r_v3_create
           changed_when: true
           failed_when: false
@@ -293,7 +306,7 @@
           block:
             - name: "U_59_2 | compute | init"
               ansible.builtin.set_fact:
-                u592_cmd: "SNMPv3 입력값 확인; (ready 시) net-snmp-create-v3-user ...; edit {{ snmpd_conf }}(createUser/rouser|rwuser); (if changed) systemctl restart {{ snmp_service }}"
+                u592_cmd: "SNMPv3 입력값 확인; (ready 시) {{ v3_cmd_log }}; edit {{ snmpd_conf }}(createUser/rouser|rwuser); (if changed) systemctl restart {{ snmp_service }}"
                 u592_status: 0
                 u592_desc: ""
               changed_when: false
@@ -309,7 +322,8 @@
               ansible.builtin.set_fact:
                 u592_status: 2
                 u592_desc: >-
-                  {% set create_ok = ((r_v3_create.rc | default(1) | int) == 0) %}
+                  {% set create_rc = (r_v3_create.rc | default(1) | int) %}
+                  {% set create_ok = (create_rc == 0) %}
                   {% set cu_fail = (r_conf_createuser.failed | default(false)) | bool %}
                   {% set ac_fail = (r_conf_access.failed | default(false)) | bool %}
                   {% if create_ok and (not cu_fail) and (not ac_fail) %}
@@ -325,22 +339,39 @@
                 u592_result: "{{ ((u592_status | int) == 2) | ternary('조치 성공 (status: 2)', '조치 불가 (status: 0)') }}"
               changed_when: false
 
+        # ✅ [추가] U_59_2 가이드/근거 로그 (요청 반영)
+        - name: "U_59_2 | emit stderr BASIS log JSON (controller + stderr stream, UTF8-safe)"
+          delegate_to: localhost
+          become: false
+          ansible.builtin.shell: >
+            printf '%s\n' '{{ {
+              "ts": (ts_592_b.stderr_ts | default("")),
+              "flag_id": "U_59_2",
+              "section": "SNMPv3 적용(입력값 기반 사용자 생성 및 snmpd.conf 반영)",
+              "title": "[U_59_2] 조치 근거",
+              "cmd": "GUIDE/BASIS: " ~ (U_59_2_BASIS_TEXT | default("")),
+              "result": "근거 기록"
+            } | to_json }}'
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
+            | tee -a '{{ my_log_file }}' 1>&2
+          vars:
+            ts_592_b:
+              stderr_ts: "{{ lookup('pipe', TS_STDERR_CMD) }}"
+          changed_when: false
+
         - name: "U_59_2 | emit stderr log JSON (controller + stderr stream, UTF8-safe)"
           delegate_to: localhost
           become: false
-          ansible.builtin.shell: |
+          ansible.builtin.shell: >
             printf '%s\n' '{{ {
               "ts": (ts_592_e.stderr_ts | default("")),
               "flag_id": "U_59_2",
               "section": "SNMPv3 적용(입력값 기반 사용자 생성 및 snmpd.conf 반영)",
               "title": "[U_59_2] SNMPv3 적용(사용자 생성 및 snmpd.conf 반영)",
-              "cmd": (
-                (v3_ready | bool)
-                | ternary(u592_cmd, "입력값 미제공으로 자동조치 불가 → 수동조치 필요")
-              ),
+              "cmd": u592_cmd,
               "result": u592_result
-            } | to_json }}' \
-            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            } | to_json }}'
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
             | tee -a '{{ my_log_file }}' 1>&2
           vars:
             ts_592_e:
@@ -350,7 +381,7 @@
         - name: "U_59_2 | emit stdout result JSON (controller + stdout stream, UTF8-safe)"
           delegate_to: localhost
           become: false
-          ansible.builtin.shell: |
+          ansible.builtin.shell: >
             printf '%s\n' '{{ {
               "meta": {"hostname": META_HOSTNAME, "ip": META_IP, "user": META_USER},
               "result": {
@@ -360,8 +391,8 @@
                 "category": "service",
                 "timestamp": (ts_592_o.stdout_ts | default(""))
               }
-            } | to_json }}' \
-            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))' \
+            } | to_json }}'
+            | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), ensure_ascii=False))'
             | tee -a '{{ my_json_file }}'
           vars:
             ts_592_o:
