@@ -47,7 +47,7 @@
       delegate_to: localhost          # [필수] Controller에 저장
       become: false                   # [필수] 로컬 파일 쓰기 권한 문제 방지
       ansible.builtin.lineinfile:
-       path: "{{ my_log_file }}"     # [필수] vars에 선언한 로그 파일 경로
+       path: "{{ my_log_file }}_U_25.log"     # [필수] vars에 선언한 로그 파일 경로
        create: yes                   # [옵션] 파일 없으면 생성
        mode: '0644'                  # [옵션] 파일 권한 설정 (선택사항)
        line: >-
