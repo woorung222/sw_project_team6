@@ -21,7 +21,7 @@
 ## 시스템 아키텍처
 ---
 
-├── isms-ansible                      # 최상위 root 
+├── isms-ansible                      // 최상위 root 
 │   ├── ansible.cfg
 │   ├── common                        # 로그 설정 
 │   │   └── common_logging.sh
