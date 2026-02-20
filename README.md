@@ -34,14 +34,17 @@
 ## 시스템 아키텍처
 ---
 
-#### <Loadmap>
+#### [Loadmap]
+
 <img src="img/Screenshot 2026-02-20 110242.png" >
 
-#### <DB Architecture>
-<img src="img/ ">
-<img src="img/ ">
+#### [DB Architecture]
 
-#### <Ansible Playbook Module Architecture>
+<img src="img/Screenshot 2026-02-20 111642.png">
+
+<img src="img/Screenshot 2026-02-20 111714.png">
+
+#### [Ansible Playbook Module Architecture]
 
 ├── isms-ansible                      # 최상위 root 
 
@@ -201,14 +204,24 @@
 ## 예상 성과 ( <- 자체 평가에 해당)
 ---
 [기술적 성과]
--  환경 구성 완성 측면
-- 시스템 구성 완성 측면
-- 구현 완성 측면
+
+| 환경 구성 완성 측면| 이기종 OS 환경 내 자동 진단 및 조치 정상 동작 검증|
+| --- | --- |
+| | 자동 진단 -> 자동 조치 -> 결과 분석 <br> End-to-End 자동화 구조 구현|
+| 시스템 구성 완성 측면| Controller-Target 기반 중앙 통제형 자동 조치 아키텍처 구현|
+| | Ansible 기반 조치 + fhrm/JSON 중앙 관리 + Dashboard 연계 구조 완성|
+| 구현 완성 측면 | 취약점 자동 진단 및 자동 조치 기능 안정적으로 구현​|
+| | 자동 조치 + 수동 조치 지원 Hybrid 구조 및 가이드 제공 기능 구현 |
 
 [운영적 성과]
-- 일정 달성 평가
-- 협업 및 역할 수행 체계
-- 문제 해결 및 개선 대응 역량
+
+| 일정 달성 평가 | 계획된 일정에 따라 자동 진단/조치, 결과 분석 기능 구현​ |​
+| --- | --- |
+| | 일일보고작성을 통한 스케줄 및 업무 달성률 관리 |
+| 협업 및 역할 수행 체계 |  진단·조치·DB·Dashboard 영역별 역할 분담 및 협업 수행 |​
+| | 단위/통합 테스트 기반 상호 검증 체계 운영 |​
+| 문제 해결 및 개선 대응 역량 | JSON/Log 구조 개선을 통한 데이터 체계 정비 |​
+| | 자동화 불가 항목에 대한 가이드 기반 보완 설계 반영 |​
 
 ## 한계점
 ---
